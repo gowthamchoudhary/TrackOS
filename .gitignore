@@ -145,3 +145,4 @@ vite.config.ts.timestamp-*
 # VS Code extension packages and local TraceOS state
 *.vsix
 .traceos/
+.traceos-backend/
