@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import {
+  AgentEvidenceIngestionResult,
+  AgentRunEvidence,
   BackendHealthResult,
   MemoryIngestionResult
 } from "../types/memory";
@@ -28,6 +30,13 @@ interface AssembleResponse {
 interface HealthResponse {
   ok: boolean;
   hydraConfigured: boolean;
+}
+
+interface AgentEvidenceResponse {
+  ok: boolean;
+  attempted: number;
+  ingested: number;
+  message: string;
 }
 
 export async function ingestMemory(
@@ -87,6 +96,39 @@ export async function assembleManagedContext(
   } catch (error) {
     console.error(`[TraceOS] Backend context failed: ${errorMessage(error)}`);
     return undefined;
+  }
+}
+
+export async function ingestAgentEvidence(
+  evidence: AgentRunEvidence,
+  workspace: WorkspaceInfo
+): Promise<AgentEvidenceIngestionResult> {
+  try {
+    const response = await postJson<AgentEvidenceResponse>(
+      workspace,
+      "/api/memory/agent-output",
+      {
+        userId: getUserId(workspace),
+        project: workspace.name,
+        evidence
+      }
+    );
+    return {
+      attempted: response.attempted,
+      ingested: response.ingested,
+      backendAvailable: true,
+      message: response.message
+    };
+  } catch (error) {
+    console.error(
+      `[TraceOS] Agent evidence ingestion failed: ${errorMessage(error)}`
+    );
+    return {
+      attempted: 0,
+      ingested: 0,
+      backendAvailable: false,
+      message: `${BACKEND_UNAVAILABLE} ${errorMessage(error)}`
+    };
   }
 }
 

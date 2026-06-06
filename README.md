@@ -8,7 +8,7 @@ TraceOS activates and starts capture when VS Code opens. The normal workflow
 is entirely in the TraceOS sidebar: enter a request, select a coding agent,
 and choose **Run With TraceOS Memory**. TraceOS refreshes evidence, performs
 managed ingestion and recall, writes `.traceos/TRACEOS_CONTEXT.md`, and starts
-the selected agent with that context automatically.
+the selected agent as a TraceOS-owned child process with that context.
 
 On startup TraceOS creates `.traceos/session.json` and
 `.traceos/terminal.log`, captures a baseline snapshot, and sends it to the
@@ -53,6 +53,7 @@ Routes:
 
 - `GET /api/health`
 - `POST /api/memory/ingest`
+- `POST /api/memory/agent-output`
 - `POST /api/context/assemble`
 
 The ingestion response includes received evidence counts, attempted and stored
@@ -70,16 +71,17 @@ same diagnostic in more than one distinct snapshot.
 - `traceos.userId` defaults to `local_user`
 - `traceos.customAgentCommand`
 
-TraceOS validates the selected CLI before opening an agent terminal. Claude
-Code requires `claude`, Codex requires `codex`, and Gemini requires `gemini`.
-For built-in agents, TraceOS writes the prepared prompt to
-`.traceos/AGENT_PROMPT.md` and passes a short initial instruction as part of
-the CLI launch command. This prevents prompt text from being interpreted by
-the shell while the agent is still starting.
+TraceOS validates the selected CLI before spawning it. Claude Code requires
+`claude`, Codex requires `codex`, and Gemini requires `gemini`. TraceOS writes
+the prepared prompt to `.traceos/AGENT_PROMPT.md`, sends only a short file
+instruction through the child process input, captures stdout/stderr and exit
+status, writes the full stream to `.traceos/agent-session.log`, and displays
+it in the `TraceOS Agent` output channel. Prompt lines are never sent to a
+PowerShell terminal.
 If a CLI is unavailable, TraceOS opens the generated context and copies the
-agent prompt instead of sending prompt text to a shell.
+agent prompt instead of launching a terminal.
 
 The extension contains no HydraDB credentials. If managed ingestion or recall
-fails, TraceOS still writes a local context from exact workspace evidence. It
-then launches an installed agent CLI, or opens the context and copies the
-prepared prompt when the selected CLI is unavailable.
+fails, TraceOS still writes a local context from exact workspace evidence.
+Captured agent output, detected error text, and non-zero exit codes are sent
+back as exact HydraDB evidence with inference disabled.

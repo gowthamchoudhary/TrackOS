@@ -1,13 +1,14 @@
 import { promises as fs } from "node:fs";
 import * as vscode from "vscode";
 import {
+  AgentRunner,
   AgentId,
-  buildAgentPrompt,
-  launchAgent
-} from "./services/agentRouter";
+  buildAgentPrompt
+} from "./services/agentRunner";
 import { CaptureService } from "./services/captureService";
 import {
   assembleManagedContext,
+  ingestAgentEvidence,
   ingestMemory,
   testBackend
 } from "./services/memoryService";
@@ -26,6 +27,7 @@ import {
 const captureServices = new Map<string, CaptureService>();
 let captureStatusItem: vscode.StatusBarItem;
 let sidebarProvider: TraceosViewProvider;
+let agentRunner: AgentRunner;
 
 export async function activate(
   context: vscode.ExtensionContext
@@ -36,6 +38,8 @@ export async function activate(
   );
   captureStatusItem.command = "traceos.captureStatusAction";
   captureStatusItem.show();
+  const agentOutput = vscode.window.createOutputChannel("TraceOS Agent");
+  agentRunner = new AgentRunner(agentOutput);
 
   sidebarProvider = new TraceosViewProvider(
     context.extensionUri,
@@ -68,6 +72,8 @@ export async function activate(
       void runCommand(autoStartCapture);
     }),
     captureStatusItem,
+    agentRunner,
+    agentOutput,
     {
       dispose: () => {
         for (const service of captureServices.values()) {
@@ -131,15 +137,34 @@ async function runWithTraceosMemory(
   await fs.writeFile(workspace.agentPromptFile, prompt, "utf8");
   await reportStatus("Context generated");
 
-  const launch = await launchAgent(agentId, workspace);
-  if (!launch.launched) {
-    await handleMissingAgent(launch.command, prompt, workspace);
+  await reportStatus("Starting TraceOS Agent");
+  const run = await agentRunner.run(agentId, workspace);
+  if (!run.launched) {
+    await handleMissingAgent(run.command, prompt, workspace);
     await reportStatus("CLI missing, prompt copied");
     return "CLI missing, prompt copied";
   }
 
-  await reportStatus("Agent launched");
-  return "Agent launched";
+  await reportStatus("Agent completed; storing captured output");
+  const ingestion = await ingestAgentEvidence(run.evidence, workspace);
+  if (!ingestion.backendAvailable) {
+    await reportStatus(`Backend error: ${ingestion.message}`, "error");
+  } else {
+    await reportStatus(
+      `Agent memories stored: ${ingestion.ingested}`,
+      "success"
+    );
+  }
+
+  if (run.evidence.exitCode !== 0) {
+    throw new Error(
+      `Agent exited with code ${String(run.evidence.exitCode)}. Captured output is in TraceOS Agent and .traceos/agent-session.log.`
+    );
+  }
+
+  return ingestion.backendAvailable
+    ? `Agent completed; memories stored: ${ingestion.ingested}`
+    : "Agent completed; backend ingestion failed";
 }
 
 async function handleMissingAgent(

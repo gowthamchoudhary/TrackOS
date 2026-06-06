@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { AgentId } from "../services/agentRouter";
+import { AgentId } from "../services/agentRunner";
 
 interface RunRequestMessage {
   type: "run";
@@ -214,7 +214,7 @@ function getHtml(webview: vscode.Webview): string {
     </select>
   </div>
   <div class="agent-help">
-    Terminal agents require installed CLIs: <code>claude</code>,
+    TraceOS runs and observes installed CLIs: <code>claude</code>,
     <code>codex</code>, <code>gemini</code>. If unavailable, TraceOS copies
     the prepared prompt.
   </div>

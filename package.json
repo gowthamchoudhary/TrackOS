@@ -71,7 +71,7 @@
         "traceos.customAgentCommand": {
           "type": "string",
           "default": "",
-          "description": "Terminal command used when Custom command is selected in the TraceOS sidebar"
+          "description": "CLI command spawned and observed by TraceOS when Custom command is selected"
         }
       }
     }

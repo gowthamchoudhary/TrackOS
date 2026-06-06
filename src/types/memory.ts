@@ -5,6 +5,9 @@ export type TraceMemoryEventType =
   | "git_status"
   | "git_diff"
   | "terminal_log"
+  | "agent_output"
+  | "agent_error"
+  | "agent_command_failure"
   | "constraint"
   | "pattern";
 
@@ -47,5 +50,26 @@ export interface MemoryIngestionResult {
 export interface BackendHealthResult {
   success: boolean;
   hydraConfigured: boolean;
+  message: string;
+}
+
+export interface AgentRunEvidence {
+  id: string;
+  agentId: string;
+  command: string;
+  startedAt: string;
+  completedAt: string;
+  exitCode: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+  output: string;
+  errorPatterns: string[];
+}
+
+export interface AgentEvidenceIngestionResult {
+  attempted: number;
+  ingested: number;
+  backendAvailable: boolean;
   message: string;
 }

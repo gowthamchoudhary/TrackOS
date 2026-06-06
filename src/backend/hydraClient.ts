@@ -194,6 +194,9 @@ function readEventType(
     "git_status",
     "git_diff",
     "terminal_log",
+    "agent_output",
+    "agent_error",
+    "agent_command_failure",
     "constraint",
     "pattern"
   ];

@@ -1,4 +1,5 @@
 import {
+  AgentRunEvidence,
   MemoryRecallResult,
   TraceMemory
 } from "../types/memory";
@@ -21,6 +22,12 @@ export interface IngestionResult {
   attempted: number;
   ingested: number;
   skippedReasons: string[];
+  message: string;
+}
+
+export interface AgentIngestionResult {
+  attempted: number;
+  ingested: number;
   message: string;
 }
 
@@ -58,26 +65,7 @@ export async function ingestMemory(
     };
   }
 
-  try {
-    const connection = getHydraConnection(project, userId);
-    const hydraMemories = buildHydraMemoryPayload(memories);
-    logHydraIngestRequest(connection, hydraMemories);
-    await connection.client.context.ingest({
-      type: "memory",
-      tenantId: connection.tenantId,
-      subTenantId: connection.subTenantId,
-      upsert: true,
-      memories: hydraMemories
-    });
-    console.log(
-      `[TraceOS Backend] HydraDB ingest succeeded: ${memories.length}/${memories.length} memory item${plural(memories.length)} stored.`
-    );
-  } catch (error) {
-    console.error(
-      `[TraceOS Backend] HydraDB ingest failed for ${memories.length} memory item${plural(memories.length)}: ${errorMessage(error)}`
-    );
-    throw error;
-  }
+  await ingestTraceMemories(project, userId, memories);
 
   return {
     received,
@@ -85,6 +73,28 @@ export async function ingestMemory(
     ingested: memories.length,
     skippedReasons,
     message: `Stored ${memories.length} real memory item${plural(memories.length)} in HydraDB.`
+  };
+}
+
+export async function ingestAgentOutput(
+  userId: string,
+  project: string,
+  evidence: AgentRunEvidence
+): Promise<AgentIngestionResult> {
+  const memories = agentEvidenceToMemories(evidence, project, userId);
+  if (memories.length === 0) {
+    return {
+      attempted: 0,
+      ingested: 0,
+      message: "Agent produced no output or command failure evidence."
+    };
+  }
+
+  await ingestTraceMemories(project, userId, memories);
+  return {
+    attempted: memories.length,
+    ingested: memories.length,
+    message: `Stored ${memories.length} real agent memory item${plural(memories.length)} in HydraDB.`
   };
 }
 
@@ -195,6 +205,72 @@ export function snapshotToMemories(
   return memories;
 }
 
+export function agentEvidenceToMemories(
+  evidence: AgentRunEvidence,
+  project: string,
+  userId: string
+): TraceMemory[] {
+  const memories: TraceMemory[] = [];
+  const timestamp = evidence.completedAt;
+  const common = {
+    project,
+    userId,
+    infer: false,
+    timestamp
+  } as const;
+
+  if (evidence.output) {
+    memories.push({
+      ...common,
+      id: `${evidence.id}:output`,
+      label: `${evidence.agentId} agent output`,
+      eventType: "agent_output",
+      rawEvidence: evidence.output,
+      summary: `Exact captured stdout/stderr from ${evidence.command}.`,
+      tags: ["agent", evidence.agentId, "output"],
+      importance: "medium"
+    });
+  }
+
+  if (evidence.errorPatterns.length > 0) {
+    memories.push({
+      ...common,
+      id: `${evidence.id}:error`,
+      label: `${evidence.agentId} agent error output`,
+      eventType: "agent_error",
+      rawEvidence: evidence.output || evidence.stderr,
+      summary: `Captured agent output matched: ${evidence.errorPatterns.join(", ")}.`,
+      tags: ["agent", evidence.agentId, "error", ...evidence.errorPatterns],
+      importance: "high"
+    });
+  }
+
+  if (evidence.exitCode !== 0) {
+    memories.push({
+      ...common,
+      id: `${evidence.id}:command_failure`,
+      label: `${evidence.agentId} agent command failure`,
+      eventType: "agent_command_failure",
+      rawEvidence: JSON.stringify(
+        {
+          command: evidence.command,
+          exitCode: evidence.exitCode,
+          signal: evidence.signal,
+          stderr: evidence.stderr,
+          output: evidence.output
+        },
+        null,
+        2
+      ),
+      summary: `${evidence.command} exited with code ${String(evidence.exitCode)}.`,
+      tags: ["agent", evidence.agentId, "command-failure"],
+      importance: "high"
+    });
+  }
+
+  return memories;
+}
+
 function diagnosticMemory(
   snapshot: Snapshot,
   project: string,
@@ -276,4 +352,31 @@ function buildSkippedReasons(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function ingestTraceMemories(
+  project: string,
+  userId: string,
+  memories: TraceMemory[]
+): Promise<void> {
+  try {
+    const connection = getHydraConnection(project, userId);
+    const hydraMemories = buildHydraMemoryPayload(memories);
+    logHydraIngestRequest(connection, hydraMemories);
+    await connection.client.context.ingest({
+      type: "memory",
+      tenantId: connection.tenantId,
+      subTenantId: connection.subTenantId,
+      upsert: true,
+      memories: hydraMemories
+    });
+    console.log(
+      `[TraceOS Backend] HydraDB ingest succeeded: ${memories.length}/${memories.length} memory item${plural(memories.length)} stored.`
+    );
+  } catch (error) {
+    console.error(
+      `[TraceOS Backend] HydraDB ingest failed for ${memories.length} memory item${plural(memories.length)}: ${errorMessage(error)}`
+    );
+    throw error;
+  }
 }

@@ -1,9 +1,14 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { assembleContext } from "../services/contextAssembler";
+import { AgentRunEvidence } from "../types/memory";
 import { Snapshot } from "../types/snapshot";
 import { DiagnosticRegistry } from "./diagnosticRegistry";
 import { isHydraConfigured } from "./hydraClient";
-import { ingestMemory, recallRelevantContext } from "./memoryService";
+import {
+  ingestAgentOutput,
+  ingestMemory,
+  recallRelevantContext
+} from "./memoryService";
 
 const PORT = readPort(process.env.PORT);
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -21,6 +26,12 @@ interface AssembleBody {
   project: string;
   request: string;
   snapshot: Snapshot;
+}
+
+interface AgentOutputBody {
+  userId: string;
+  project: string;
+  evidence: AgentRunEvidence;
 }
 
 const server = createServer(async (request, response) => {
@@ -74,6 +85,28 @@ async function route(
       body.project,
       body.snapshot,
       registry
+    );
+    sendJson(response, 200, { ok: true, ...result });
+    return;
+  }
+
+  if (method === "POST" && path === "/api/memory/agent-output") {
+    const body = requireAgentOutputBody(await readJson(request));
+    console.log(
+      [
+        "[TraceOS Backend] Agent output request",
+        `userId=${body.userId}`,
+        `project=${body.project}`,
+        `agent=${body.evidence.agentId}`,
+        `outputLength=${body.evidence.output.length}`,
+        `stderrLength=${body.evidence.stderr.length}`,
+        `exitCode=${String(body.evidence.exitCode)}`
+      ].join(" ")
+    );
+    const result = await ingestAgentOutput(
+      body.userId,
+      body.project,
+      body.evidence
     );
     sendJson(response, 200, { ok: true, ...result });
     return;
@@ -146,6 +179,18 @@ function requireAssembleBody(value: unknown): AssembleBody {
   return body as unknown as AssembleBody;
 }
 
+function requireAgentOutputBody(value: unknown): AgentOutputBody {
+  const body = requireObject(value);
+  if (
+    !isNonEmptyString(body.userId) ||
+    !isNonEmptyString(body.project) ||
+    !isAgentRunEvidence(body.evidence)
+  ) {
+    throw new Error("Invalid agent output ingestion request.");
+  }
+  return body as unknown as AgentOutputBody;
+}
+
 function requireObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Request body must be a JSON object.");
@@ -167,6 +212,27 @@ function isSnapshot(value: unknown): value is Snapshot {
     Boolean(snapshot.git) &&
     typeof snapshot.terminalLog === "string" &&
     Array.isArray(snapshot.events)
+  );
+}
+
+function isAgentRunEvidence(value: unknown): value is AgentRunEvidence {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const evidence = value as Partial<AgentRunEvidence>;
+  return (
+    isNonEmptyString(evidence.id) &&
+    isNonEmptyString(evidence.agentId) &&
+    isNonEmptyString(evidence.command) &&
+    isNonEmptyString(evidence.startedAt) &&
+    isNonEmptyString(evidence.completedAt) &&
+    (typeof evidence.exitCode === "number" || evidence.exitCode === null) &&
+    (typeof evidence.signal === "string" || evidence.signal === null) &&
+    typeof evidence.stdout === "string" &&
+    typeof evidence.stderr === "string" &&
+    typeof evidence.output === "string" &&
+    Array.isArray(evidence.errorPatterns) &&
+    evidence.errorPatterns.every((pattern) => typeof pattern === "string")
   );
 }
 

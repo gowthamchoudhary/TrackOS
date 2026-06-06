@@ -8,6 +8,7 @@ export interface WorkspaceInfo {
   traceDirectory: string;
   sessionFile: string;
   terminalLogFile: string;
+  agentSessionLogFile: string;
   contextFile: string;
   agentPromptFile: string;
 }
@@ -38,6 +39,7 @@ function workspaceInfo(folder: vscode.WorkspaceFolder): WorkspaceInfo {
     traceDirectory,
     sessionFile: path.join(traceDirectory, "session.json"),
     terminalLogFile: path.join(traceDirectory, "terminal.log"),
+    agentSessionLogFile: path.join(traceDirectory, "agent-session.log"),
     contextFile: path.join(traceDirectory, "TRACEOS_CONTEXT.md"),
     agentPromptFile: path.join(traceDirectory, "AGENT_PROMPT.md")
   };
