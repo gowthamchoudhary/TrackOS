@@ -58,10 +58,14 @@ same diagnostic in more than one distinct snapshot.
 - `traceos.backendUrl` defaults to `https://trackos-h16r.onrender.com`
 - `traceos.userId` defaults to `local_user`
 - `traceos.customAgentCommand`
-- `traceos.autoSubmitPrompt` defaults to `false`
+- `traceos.autoSubmitPrompt` defaults to `false` and applies to Custom command
 
 TraceOS validates the selected CLI before opening an agent terminal. Claude
 Code requires `claude`, Codex requires `codex`, and Gemini requires `gemini`.
+For built-in agents, TraceOS writes the prepared prompt to
+`.traceos/AGENT_PROMPT.md` and passes a short initial instruction as part of
+the CLI launch command. This prevents prompt text from being interpreted by
+the shell while the agent is still starting.
 If a CLI is unavailable, TraceOS opens the generated context and copies the
 agent prompt instead of sending prompt text to a shell.
 

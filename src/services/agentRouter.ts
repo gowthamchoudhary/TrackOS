@@ -11,6 +11,8 @@ const AGENT_COMMANDS: Record<Exclude<AgentId, "custom">, string> = {
   codex: "codex",
   gemini: "gemini"
 };
+const PROMPT_FILE_INSTRUCTION =
+  "Read .traceos/AGENT_PROMPT.md and follow the instructions in it.";
 
 export interface AgentLaunchResult {
   command: string;
@@ -43,14 +45,21 @@ export async function launchAgent(
   });
 
   terminal.show(true);
-  terminal.sendText(command, true);
-  await delay(750);
-  terminal.sendText(prompt, autoSubmit);
+  if (agentId === "custom") {
+    terminal.sendText(command, true);
+    await delay(750);
+    terminal.sendText(prompt, autoSubmit);
+  } else {
+    terminal.sendText(
+      `${command} "${PROMPT_FILE_INSTRUCTION}"`,
+      true
+    );
+  }
 
   return {
     command,
     launched: true,
-    autoSubmitted: autoSubmit
+    autoSubmitted: agentId === "custom" ? autoSubmit : true
   };
 }
 

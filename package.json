@@ -72,7 +72,7 @@
         "traceos.autoSubmitPrompt": {
           "type": "boolean",
           "default": false,
-          "description": "Submit the TraceOS prompt after the validated agent command starts. When false, the prompt is inserted without pressing Enter."
+          "description": "For Custom command only, submit the TraceOS prompt after the command starts. When false, the prompt is inserted without pressing Enter."
         }
       }
     }

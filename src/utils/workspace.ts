@@ -9,6 +9,7 @@ export interface WorkspaceInfo {
   sessionFile: string;
   terminalLogFile: string;
   contextFile: string;
+  agentPromptFile: string;
 }
 
 export function getCurrentWorkspace(): WorkspaceInfo | undefined {
@@ -37,7 +38,8 @@ function workspaceInfo(folder: vscode.WorkspaceFolder): WorkspaceInfo {
     traceDirectory,
     sessionFile: path.join(traceDirectory, "session.json"),
     terminalLogFile: path.join(traceDirectory, "terminal.log"),
-    contextFile: path.join(traceDirectory, "TRACEOS_CONTEXT.md")
+    contextFile: path.join(traceDirectory, "TRACEOS_CONTEXT.md"),
+    agentPromptFile: path.join(traceDirectory, "AGENT_PROMPT.md")
   };
 }
 

@@ -167,6 +167,7 @@ async function runWithTraceosMemory(
 
   await generateContext(request, workspace);
   const prompt = buildAgentPrompt(request);
+  await fs.writeFile(workspace.agentPromptFile, prompt, "utf8");
   await reportStatus("Context generated");
 
   const launch = await launchAgent(agentId, prompt, workspace);
