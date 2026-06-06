@@ -62,6 +62,42 @@ export function buildHydraMemoryPayload(memories: TraceMemory[]): string {
   );
 }
 
+export function logHydraIngestRequest(
+  connection: HydraConnection,
+  memories: string
+): void {
+  let parsedMemories: unknown;
+  try {
+    parsedMemories = JSON.parse(memories);
+  } catch (error) {
+    parsedMemories = {
+      parseError: error instanceof Error ? error.message : String(error)
+    };
+  }
+
+  const firstMemory = Array.isArray(parsedMemories)
+    ? parsedMemories[0]
+    : undefined;
+  const firstMemoryObject =
+    firstMemory && typeof firstMemory === "object"
+      ? (firstMemory as Record<string, unknown>)
+      : undefined;
+
+  console.log("[TraceOS Backend] HydraDB ingest request details", {
+    tenantId: connection.tenantId,
+    tenant_id: connection.tenantId,
+    subTenantId: connection.subTenantId,
+    sub_tenant_id: connection.subTenantId,
+    "typeof memories": typeof memories,
+    "raw memories first 1000 chars": memories.slice(0, 1000),
+    "parsed memories[0]": firstMemory,
+    "typeof parsed memories[0].metadata": typeof firstMemoryObject?.metadata,
+    "parsed memories[0].metadata value": firstMemoryObject?.metadata,
+    "typeof parsed memories[0].additional_metadata":
+      typeof firstMemoryObject?.additional_metadata
+  });
+}
+
 export function parseHydraMemories(
   response: Awaited<ReturnType<HydraDBClient["query"]>>,
   project: string,

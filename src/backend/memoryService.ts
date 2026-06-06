@@ -7,6 +7,7 @@ import { DiagnosticRegistry, RepeatedDiagnostic } from "./diagnosticRegistry";
 import {
   buildHydraMemoryPayload,
   getHydraConnection,
+  logHydraIngestRequest,
   parseHydraMemories
 } from "./hydraClient";
 
@@ -21,6 +22,18 @@ export interface IngestionResult {
   ingested: number;
   skippedReasons: string[];
   message: string;
+}
+
+interface HydraFormatAttempt {
+  success: boolean;
+  error?: string;
+  raw?: unknown;
+}
+
+export interface HydraFormatTestResult {
+  ok: true;
+  stringMetadata: HydraFormatAttempt;
+  objectMetadata: HydraFormatAttempt;
 }
 
 export async function ingestMemory(
@@ -59,12 +72,14 @@ export async function ingestMemory(
 
   try {
     const connection = getHydraConnection(project, userId);
+    const hydraMemories = buildHydraMemoryPayload(memories);
+    logHydraIngestRequest(connection, hydraMemories);
     await connection.client.context.ingest({
       type: "memory",
       tenantId: connection.tenantId,
       subTenantId: connection.subTenantId,
       upsert: true,
-      memories: buildHydraMemoryPayload(memories)
+      memories: hydraMemories
     });
     console.log(
       `[TraceOS Backend] HydraDB ingest succeeded: ${memories.length}/${memories.length} memory item${plural(memories.length)} stored.`
@@ -82,6 +97,54 @@ export async function ingestMemory(
     ingested: memories.length,
     skippedReasons,
     message: `Stored ${memories.length} real memory item${plural(memories.length)} in HydraDB.`
+  };
+}
+
+export async function testHydraMetadataFormats(
+  userId: string,
+  project: string
+): Promise<HydraFormatTestResult> {
+  const connection = getHydraConnection(project, userId);
+  const timestamp = new Date().toISOString();
+  const commonMemory = {
+    text: "TraceOS HydraDB metadata format test",
+    is_markdown: true,
+    infer: false,
+    additional_metadata: {
+      source: "traceos_debug",
+      timestamp
+    }
+  };
+
+  const stringMetadata = await attemptHydraFormat(
+    connection,
+    JSON.stringify([
+      {
+        ...commonMemory,
+        metadata: JSON.stringify({
+          event_type: "diagnostic",
+          project: "traceos_debug"
+        })
+      }
+    ])
+  );
+  const objectMetadata = await attemptHydraFormat(
+    connection,
+    JSON.stringify([
+      {
+        ...commonMemory,
+        metadata: {
+          event_type: "diagnostic",
+          project: "traceos_debug"
+        }
+      }
+    ])
+  );
+
+  return {
+    ok: true,
+    stringMetadata,
+    objectMetadata
   };
 }
 
@@ -273,4 +336,34 @@ function buildSkippedReasons(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function attemptHydraFormat(
+  connection: ReturnType<typeof getHydraConnection>,
+  memories: string
+): Promise<HydraFormatAttempt> {
+  try {
+    logHydraIngestRequest(connection, memories);
+    const raw = await connection.client.context.ingest({
+      type: "memory",
+      tenantId: connection.tenantId,
+      subTenantId: connection.subTenantId,
+      upsert: true,
+      memories
+    });
+    return { success: true, raw };
+  } catch (error) {
+    return {
+      success: false,
+      error: errorMessage(error),
+      raw: errorBody(error)
+    };
+  }
+}
+
+function errorBody(error: unknown): unknown {
+  if (!error || typeof error !== "object" || !("body" in error)) {
+    return undefined;
+  }
+  return (error as { body?: unknown }).body;
 }
