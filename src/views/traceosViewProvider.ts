@@ -10,17 +10,19 @@ interface RunRequestMessage {
 export type TraceosRunHandler = (
   request: string,
   agentId: AgentId,
-  reportStatus: (status: TraceosRunStatus) => Promise<void>
+  reportStatus: (
+    status: TraceosRunStatus,
+    state?: "running" | "success" | "error"
+  ) => Promise<void>
 ) => Promise<string>;
 
-export type TraceosRunStatus =
-  | "Capturing..."
-  | "Context generated"
-  | "Agent launched"
-  | "CLI missing, prompt copied";
+export type TraceosRunStatus = string;
 
 export class TraceosViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "traceos.sidebar";
+  private webview: vscode.Webview | undefined;
+  private latestStatus = "Capturing";
+  private latestState: "running" | "success" | "error" = "running";
 
   public constructor(
     private readonly extensionUri: vscode.Uri,
@@ -28,11 +30,16 @@ export class TraceosViewProvider implements vscode.WebviewViewProvider {
   ) {}
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
+    this.webview = webviewView.webview;
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [this.extensionUri]
     };
     webviewView.webview.html = getHtml(webviewView.webview);
+    webviewView.onDidDispose(() => {
+      this.webview = undefined;
+    });
+    void this.reportStatus(this.latestStatus, this.latestState);
     webviewView.webview.onDidReceiveMessage(async (message: unknown) => {
       if (!isRunRequest(message)) {
         return;
@@ -40,30 +47,47 @@ export class TraceosViewProvider implements vscode.WebviewViewProvider {
 
       const request = message.request.trim();
       if (!request) {
-        await postStatus(webviewView.webview, "error", "Enter a request first.");
+        await postStatus(
+          webviewView.webview,
+          "error",
+          "Enter a request first.",
+          false
+        );
         return;
       }
 
       await postStatus(
         webviewView.webview,
         "running",
-        "Capturing..."
+        "Capturing",
+        true
       );
 
       try {
         const status = await this.runHandler(
           request,
           message.agentId,
-          async (runStatus) => {
-            await postStatus(webviewView.webview, "running", runStatus);
+          async (runStatus, state = "running") => {
+            await postStatus(webviewView.webview, state, runStatus, true);
           }
         );
-        await postStatus(webviewView.webview, "success", status);
+        await postStatus(webviewView.webview, "success", status, false);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        await postStatus(webviewView.webview, "error", detail);
+        await postStatus(webviewView.webview, "error", detail, false);
       }
     });
+  }
+
+  public async reportStatus(
+    message: string,
+    state: "running" | "success" | "error" = "running"
+  ): Promise<void> {
+    this.latestStatus = message;
+    this.latestState = state;
+    if (this.webview) {
+      await postStatus(this.webview, state, message);
+    }
   }
 }
 
@@ -92,9 +116,10 @@ function isAgentId(value: unknown): value is AgentId {
 async function postStatus(
   webview: vscode.Webview,
   state: "running" | "success" | "error",
-  message: string
+  message: string,
+  busy = false
 ): Promise<void> {
-  await webview.postMessage({ type: "status", state, message });
+  await webview.postMessage({ type: "status", state, message, busy });
 }
 
 function getHtml(webview: vscode.Webview): string {
@@ -169,7 +194,7 @@ function getHtml(webview: vscode.Webview): string {
       color: var(--vscode-descriptionForeground);
       line-height: 1.4;
     }
-    #status.error {
+    #status .error {
       color: var(--vscode-errorForeground);
     }
   </style>
@@ -194,7 +219,7 @@ function getHtml(webview: vscode.Webview): string {
     the prepared prompt.
   </div>
   <button id="run">Run With TraceOS Memory</button>
-  <div id="status" role="status" aria-live="polite">Ready</div>
+  <div id="status" role="status" aria-live="polite">Capturing</div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
@@ -220,9 +245,16 @@ function getHtml(webview: vscode.Webview): string {
         return;
       }
 
-      status.textContent = message.message;
-      status.className = message.state === "error" ? "error" : "";
-      run.disabled = message.state === "running";
+      const entry = document.createElement("div");
+      entry.textContent = message.message;
+      if (message.state === "error") {
+        entry.className = "error";
+      }
+      status.appendChild(entry);
+      while (status.children.length > 6) {
+        status.removeChild(status.firstChild);
+      }
+      run.disabled = message.busy === true;
     });
   </script>
 </body>

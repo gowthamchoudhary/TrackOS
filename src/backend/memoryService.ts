@@ -11,8 +11,15 @@ import {
 } from "./hydraClient";
 
 export interface IngestionResult {
+  received: {
+    diagnostics: number;
+    gitStatusLength: number;
+    gitDiffLength: number;
+    terminalLogLength: number;
+  };
   attempted: number;
   ingested: number;
+  skippedReasons: string[];
   message: string;
 }
 
@@ -22,11 +29,36 @@ export async function ingestMemory(
   snapshot: Snapshot,
   registry: DiagnosticRegistry
 ): Promise<IngestionResult> {
-  const connection = getHydraConnection(project, userId);
   const repeated = await registry.findRepeated(project, userId, snapshot);
   const memories = snapshotToMemories(snapshot, project, userId, repeated);
+  const received = {
+    diagnostics: snapshot.diagnostics.length,
+    gitStatusLength: snapshot.git.status.length,
+    gitDiffLength: snapshot.git.diff.length,
+    terminalLogLength: snapshot.terminalLog.length
+  };
+  const skippedReasons = buildSkippedReasons(snapshot, repeated.length);
 
-  if (memories.length > 0) {
+  await registry.record(project, userId, snapshot);
+  console.log(
+    `[TraceOS Backend] Built ${memories.length} memory item${plural(memories.length)} for ${project}/${userId}.`
+  );
+
+  if (memories.length === 0) {
+    console.log(
+      `[TraceOS Backend] HydraDB ingest skipped: ${skippedReasons.join("; ")}`
+    );
+    return {
+      received,
+      attempted: 0,
+      ingested: 0,
+      skippedReasons,
+      message: skippedReasons.join("; ")
+    };
+  }
+
+  try {
+    const connection = getHydraConnection(project, userId);
     await connection.client.context.ingest({
       type: "memory",
       tenantId: connection.tenantId,
@@ -34,16 +66,22 @@ export async function ingestMemory(
       upsert: true,
       memories: buildHydraMemoryPayload(memories)
     });
+    console.log(
+      `[TraceOS Backend] HydraDB ingest succeeded: ${memories.length}/${memories.length} memory item${plural(memories.length)} stored.`
+    );
+  } catch (error) {
+    console.error(
+      `[TraceOS Backend] HydraDB ingest failed for ${memories.length} memory item${plural(memories.length)}: ${errorMessage(error)}`
+    );
+    throw error;
   }
 
-  await registry.record(project, userId, snapshot);
   return {
+    received,
     attempted: memories.length,
     ingested: memories.length,
-    message:
-      memories.length === 0
-        ? "Snapshot saved locally; no diagnostic, git diff, terminal log, or repeated diagnostic evidence was available to ingest."
-        : `Queued ${memories.length} real memory item${plural(memories.length)} for managed ingestion.`
+    skippedReasons,
+    message: `Stored ${memories.length} real memory item${plural(memories.length)} in HydraDB.`
   };
 }
 
@@ -200,4 +238,39 @@ function buildEnrichedQuery(
 
 function plural(count: number): string {
   return count === 1 ? "" : "s";
+}
+
+function buildSkippedReasons(
+  snapshot: Snapshot,
+  repeatedDiagnosticCount: number
+): string[] {
+  const reasons: string[] = [];
+  if (snapshot.diagnostics.length === 0) {
+    reasons.push("No diagnostics found");
+  }
+  if (!snapshot.git.status) {
+    reasons.push("Git status empty");
+  }
+  if (!snapshot.git.diff) {
+    reasons.push("Git diff empty");
+  }
+  if (!snapshot.terminalLog) {
+    reasons.push("Terminal log empty");
+  }
+  if (repeatedDiagnosticCount === 0) {
+    reasons.push("No repeated diagnostics found");
+  }
+  if (
+    snapshot.diagnostics.length === 0 &&
+    !snapshot.git.status &&
+    !snapshot.git.diff &&
+    !snapshot.terminalLog
+  ) {
+    reasons.push("No meaningful evidence to ingest");
+  }
+  return reasons;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

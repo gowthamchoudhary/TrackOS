@@ -57,6 +57,18 @@ async function route(
 
   if (method === "POST" && path === "/api/memory/ingest") {
     const body = requireIngestBody(await readJson(request));
+    console.log(
+      [
+        "[TraceOS Backend] Ingest request",
+        `userId=${body.userId}`,
+        `project=${body.project}`,
+        `workspaceName=${body.workspaceName}`,
+        `diagnostics=${body.snapshot.diagnostics.length}`,
+        `gitStatusLength=${body.snapshot.git.status.length}`,
+        `gitDiffLength=${body.snapshot.git.diff.length}`,
+        `terminalLogLength=${body.snapshot.terminalLog.length}`
+      ].join(" ")
+    );
     const result = await ingestMemory(
       body.userId,
       body.project,

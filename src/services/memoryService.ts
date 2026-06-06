@@ -13,8 +13,10 @@ const DEFAULT_BACKEND_URL = "https://trackos-h16r.onrender.com";
 
 interface IngestResponse {
   ok: boolean;
+  received: MemoryIngestionResult["received"];
   attempted: number;
   ingested: number;
+  skippedReasons: string[];
   message: string;
 }
 
@@ -45,18 +47,22 @@ export async function ingestMemory(
     );
 
     return {
+      received: response.received,
       attempted: response.attempted,
       ingested: response.ingested,
+      skippedReasons: response.skippedReasons,
       backendAvailable: true,
       message: response.message
     };
   } catch (error) {
     console.error(`[TraceOS] Backend ingestion failed: ${errorMessage(error)}`);
     return {
+      received: evidenceCounts(snapshot),
       attempted: 0,
       ingested: 0,
+      skippedReasons: [errorMessage(error)],
       backendAvailable: false,
-      message: BACKEND_UNAVAILABLE
+      message: `${BACKEND_UNAVAILABLE} ${errorMessage(error)}`
     };
   }
 }
@@ -167,4 +173,15 @@ function getUserId(workspace: WorkspaceInfo): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function evidenceCounts(
+  snapshot: Snapshot
+): MemoryIngestionResult["received"] {
+  return {
+    diagnostics: snapshot.diagnostics.length,
+    gitStatusLength: snapshot.git.status.length,
+    gitDiffLength: snapshot.git.diff.length,
+    terminalLogLength: snapshot.terminalLog.length
+  };
 }

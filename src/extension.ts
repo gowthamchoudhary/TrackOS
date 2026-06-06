@@ -24,15 +24,12 @@ import {
 } from "./views/traceosViewProvider";
 
 const captureServices = new Map<string, CaptureService>();
-const PRIVACY_NOTICE_KEY = "traceos.privacyNoticeShown";
-const CAPTURE_PAUSED_KEY = "traceos.capturePaused";
-let extensionContext: vscode.ExtensionContext;
 let captureStatusItem: vscode.StatusBarItem;
+let sidebarProvider: TraceosViewProvider;
 
 export async function activate(
   context: vscode.ExtensionContext
 ): Promise<void> {
-  extensionContext = context;
   captureStatusItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     100
@@ -40,7 +37,7 @@ export async function activate(
   captureStatusItem.command = "traceos.captureStatusAction";
   captureStatusItem.show();
 
-  const sidebarProvider = new TraceosViewProvider(
+  sidebarProvider = new TraceosViewProvider(
     context.extensionUri,
     runWithTraceosMemory
   );
@@ -49,15 +46,6 @@ export async function activate(
     vscode.window.registerWebviewViewProvider(
       TraceosViewProvider.viewType,
       sidebarProvider
-    ),
-    vscode.commands.registerCommand("traceos.startCapture", () =>
-      runCommand(startCapture)
-    ),
-    vscode.commands.registerCommand("traceos.pauseCapture", () =>
-      runCommand(pauseCapture)
-    ),
-    vscode.commands.registerCommand("traceos.resumeCapture", () =>
-      runCommand(resumeCapture)
     ),
     vscode.commands.registerCommand("traceos.captureStatusAction", () =>
       runCommand(captureStatusAction)
@@ -92,7 +80,6 @@ export async function activate(
 
   updateCaptureStatus();
   await autoStartCapture();
-  await showPrivacyNoticeOnce();
 }
 
 export function deactivate(): void {
@@ -102,40 +89,11 @@ export function deactivate(): void {
   captureServices.clear();
 }
 
-async function startCapture(): Promise<void> {
-  await resumeCapture();
-}
-
-async function resumeCapture(): Promise<void> {
-  if (getFileSystemWorkspaces().length === 0) {
-    requireWorkspace();
-    return;
-  }
-
-  await extensionContext.globalState.update(CAPTURE_PAUSED_KEY, false);
-  await autoStartCapture();
-}
-
-async function pauseCapture(): Promise<void> {
-  await extensionContext.globalState.update(CAPTURE_PAUSED_KEY, true);
-  for (const service of captureServices.values()) {
-    service.pause();
-  }
-  updateCaptureStatus();
-}
-
 async function captureStatusAction(): Promise<void> {
-  const workspace = getCurrentWorkspace();
-  const service = workspace
-    ? captureServices.get(workspace.rootPath)
-    : undefined;
-
-  if (service?.isStarted) {
-    await vscode.commands.executeCommand("workbench.view.extension.traceos");
+  if (!requireWorkspace()) {
     return;
   }
-
-  await resumeCapture();
+  await vscode.commands.executeCommand("workbench.view.extension.traceos");
 }
 
 async function snapshotState(): Promise<void> {
@@ -158,19 +116,22 @@ async function snapshotState(): Promise<void> {
 async function runWithTraceosMemory(
   request: string,
   agentId: AgentId,
-  reportStatus: (status: TraceosRunStatus) => Promise<void>
+  reportStatus: (
+    status: TraceosRunStatus,
+    state?: "running" | "success" | "error"
+  ) => Promise<void>
 ): Promise<string> {
   const workspace = requireWorkspace();
   if (!workspace) {
     throw new Error("TraceOS requires an open file-system workspace folder.");
   }
 
-  await generateContext(request, workspace);
+  await generateContext(request, workspace, reportStatus);
   const prompt = buildAgentPrompt(request);
   await fs.writeFile(workspace.agentPromptFile, prompt, "utf8");
   await reportStatus("Context generated");
 
-  const launch = await launchAgent(agentId, prompt, workspace);
+  const launch = await launchAgent(agentId, workspace);
   if (!launch.launched) {
     await handleMissingAgent(launch.command, prompt, workspace);
     await reportStatus("CLI missing, prompt copied");
@@ -192,7 +153,7 @@ async function handleMissingAgent(
     "Install the CLI or choose Custom command.";
 
   const document = await vscode.workspace.openTextDocument(
-    vscode.Uri.file(workspace.contextFile)
+    vscode.Uri.file(workspace.agentPromptFile)
   );
   await vscode.window.showTextDocument(document);
   await vscode.env.clipboard.writeText(prompt);
@@ -201,16 +162,40 @@ async function handleMissingAgent(
 
 async function generateContext(
   request: string,
-  workspace: WorkspaceInfo
+  workspace: WorkspaceInfo,
+  reportStatus: (
+    status: TraceosRunStatus,
+    state?: "running" | "success" | "error"
+  ) => Promise<void>
 ): Promise<void> {
+  await reportStatus("Capturing");
   const { snapshot, ingestion } = await getCaptureService(
     workspace
-  ).captureAndSave({ forceIngestion: true });
+  ).captureAndSave({
+    forceIngestion: true,
+    notify: false,
+    onBeforeIngest: () => reportStatus("Ingesting memory")
+  });
+  if (ingestion.backendAvailable) {
+    await reportStatus(
+      `Memories stored: ${ingestion.ingested}`,
+      "success"
+    );
+  } else {
+    await reportStatus(`Backend error: ${ingestion.message}`, "error");
+  }
+
   const managedMarkdown = await assembleManagedContext(
     request,
     snapshot,
     workspace
   );
+  if (!managedMarkdown) {
+    await reportStatus(
+      "Backend error: context assembly failed; using local context",
+      "error"
+    );
+  }
   const markdown =
     managedMarkdown ??
     assembleContext(
@@ -284,7 +269,26 @@ function getCaptureService(workspace: WorkspaceInfo): CaptureService {
     return existing;
   }
 
-  const service = new CaptureService(workspace, new SessionStore(workspace));
+  const service = new CaptureService(
+    workspace,
+    new SessionStore(workspace),
+    async (ingestion) => {
+      if (!sidebarProvider) {
+        return;
+      }
+      if (!ingestion.backendAvailable) {
+        await sidebarProvider.reportStatus(
+          `Backend error: ${ingestion.message}`,
+          "error"
+        );
+        return;
+      }
+      await sidebarProvider.reportStatus(
+        `Memories stored: ${ingestion.ingested}`,
+        "success"
+      );
+    }
+  );
   captureServices.set(workspace.rootPath, service);
   return service;
 }
@@ -295,16 +299,7 @@ async function autoStartCapture(): Promise<void> {
     updateCaptureStatus();
     return;
   }
-  const paused = extensionContext.globalState.get<boolean>(
-    CAPTURE_PAUSED_KEY,
-    false
-  );
-
-  if (paused) {
-    updateCaptureStatus();
-    return;
-  }
-
+  await sidebarProvider?.reportStatus("Capturing");
   await Promise.all(
     workspaces.map(async (workspace) => {
       const service = getCaptureService(workspace);
@@ -314,26 +309,6 @@ async function autoStartCapture(): Promise<void> {
     })
   );
   updateCaptureStatus();
-}
-
-async function showPrivacyNoticeOnce(): Promise<void> {
-  if (extensionContext.globalState.get<boolean>(PRIVACY_NOTICE_KEY, false)) {
-    return;
-  }
-
-  await extensionContext.globalState.update(PRIVACY_NOTICE_KEY, true);
-  const selection = await vscode.window.showInformationMessage(
-    "TraceOS runs automatically to capture diagnostics, git changes, and terminal log evidence for agent memory. You can pause it anytime.",
-    "Pause Capture"
-  );
-
-  if (selection === "Pause Capture") {
-    await extensionContext.globalState.update(CAPTURE_PAUSED_KEY, true);
-    for (const service of captureServices.values()) {
-      service.pause();
-    }
-    updateCaptureStatus();
-  }
 }
 
 function updateCaptureStatus(): void {
@@ -348,10 +323,10 @@ function updateCaptureStatus(): void {
 
   captureStatusItem.text = active
     ? "TraceOS: Capturing"
-    : "TraceOS: Paused";
+    : "TraceOS: Starting";
   captureStatusItem.tooltip = active
     ? "TraceOS capture is active. Click to open the TraceOS sidebar."
-    : "TraceOS capture is paused. Click to resume.";
+    : "TraceOS is starting automatic capture.";
 }
 
 function requireWorkspace(): WorkspaceInfo | undefined {

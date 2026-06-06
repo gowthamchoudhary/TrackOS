@@ -31,8 +31,15 @@ export interface MemoryRecallResult {
 }
 
 export interface MemoryIngestionResult {
+  received: {
+    diagnostics: number;
+    gitStatusLength: number;
+    gitDiffLength: number;
+    terminalLogLength: number;
+  };
   attempted: number;
   ingested: number;
+  skippedReasons: string[];
   backendAvailable: boolean;
   message: string;
 }

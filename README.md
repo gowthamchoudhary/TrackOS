@@ -10,6 +10,12 @@ and choose **Run With TraceOS Memory**. TraceOS refreshes evidence, performs
 managed ingestion and recall, writes `.traceos/TRACEOS_CONTEXT.md`, and starts
 the selected agent with that context automatically.
 
+On startup TraceOS creates `.traceos/session.json` and
+`.traceos/terminal.log`, captures a baseline snapshot, and sends it to the
+managed backend. Diagnostics, saves, changed-editor transitions, terminal log
+updates, and meaningful git changes trigger further debounced snapshots and
+ingestion automatically.
+
 ## Architecture
 
 ```text
@@ -49,6 +55,11 @@ Routes:
 - `POST /api/memory/ingest`
 - `POST /api/context/assemble`
 
+The ingestion response includes received evidence counts, attempted and stored
+memory counts, and explicit skip reasons when no meaningful evidence exists.
+Backend logs show the request identity, evidence sizes, memory item count, and
+HydraDB success or failure.
+
 Raw diagnostics, git diffs, and terminal logs are ingested with `infer:false`.
 Pattern memories use `infer:true` only after the backend observes the exact
 same diagnostic in more than one distinct snapshot.
@@ -58,7 +69,6 @@ same diagnostic in more than one distinct snapshot.
 - `traceos.backendUrl` defaults to `https://trackos-h16r.onrender.com`
 - `traceos.userId` defaults to `local_user`
 - `traceos.customAgentCommand`
-- `traceos.autoSubmitPrompt` defaults to `false` and applies to Custom command
 
 TraceOS validates the selected CLI before opening an agent terminal. Claude
 Code requires `claude`, Codex requires `codex`, and Gemini requires `gemini`.

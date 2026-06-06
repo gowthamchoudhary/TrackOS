@@ -68,11 +68,6 @@
           "type": "string",
           "default": "",
           "description": "Terminal command used when Custom command is selected in the TraceOS sidebar"
-        },
-        "traceos.autoSubmitPrompt": {
-          "type": "boolean",
-          "default": false,
-          "description": "For Custom command only, submit the TraceOS prompt after the command starts. When false, the prompt is inserted without pressing Enter."
         }
       }
     }

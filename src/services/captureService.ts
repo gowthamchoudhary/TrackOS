@@ -14,19 +14,22 @@ import { SessionStore } from "./sessionStore";
 
 export class CaptureService implements vscode.Disposable {
   private static readonly CAPTURE_DEBOUNCE_MS = 1_500;
-  private static readonly DIAGNOSTIC_COOLDOWN_MS = 15_000;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly pendingEvents: CaptureEvent[] = [];
+  private readonly changedDocuments = new Set<string>();
   private captureTimer: NodeJS.Timeout | undefined;
   private captureQueue: Promise<void> = Promise.resolve();
-  private lastDiagnosticIngestionAt = 0;
+  private forceScheduledIngestion = false;
   private lastGitFingerprint = "";
   private lastTerminalFingerprint = "";
   private started = false;
 
   public constructor(
     private readonly workspace: WorkspaceInfo,
-    private readonly sessionStore: SessionStore
+    private readonly sessionStore: SessionStore,
+    private readonly onIngestion?: (
+      ingestion: MemoryIngestionResult
+    ) => Promise<void> | void
   ) {}
 
   public async start(): Promise<void> {
@@ -46,7 +49,18 @@ export class CaptureService implements vscode.Disposable {
           .map((uri) => relativeWorkspacePath(this.workspace, uri.fsPath));
         if (files.length > 0) {
           this.recordEvent("diagnosticsChanged", files.join(", "));
-          this.scheduleCapture();
+          this.scheduleCapture(true);
+        }
+      }),
+      vscode.workspace.onDidChangeTextDocument((event) => {
+        const uri = event.document.uri;
+        if (
+          event.contentChanges.length > 0 &&
+          uri.scheme === "file" &&
+          vscode.workspace.getWorkspaceFolder(uri)?.uri.fsPath ===
+            this.workspace.rootPath
+        ) {
+          this.changedDocuments.add(uri.fsPath);
         }
       }),
       vscode.workspace.onDidSaveTextDocument((document) => {
@@ -54,28 +68,27 @@ export class CaptureService implements vscode.Disposable {
           vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath ===
           this.workspace.rootPath
         ) {
+          this.changedDocuments.delete(document.uri.fsPath);
           this.recordEvent(
             "documentSaved",
             relativeWorkspacePath(this.workspace, document.uri.fsPath)
           );
-          this.scheduleCapture();
+          this.scheduleCapture(true);
         }
       }),
       vscode.window.onDidChangeActiveTextEditor((editor) => {
-        const uri = editor?.document.uri;
-        if (
-          !uri ||
-          uri.scheme !== "file" ||
-          vscode.workspace.getWorkspaceFolder(uri)?.uri.fsPath !==
-            this.workspace.rootPath
-        ) {
+        if (this.changedDocuments.size === 0) {
           return;
         }
+        const changedFiles = [...this.changedDocuments].map((filePath) =>
+          relativeWorkspacePath(this.workspace, filePath)
+        );
         this.recordEvent(
           "activeEditorChanged",
-          relativeWorkspacePath(this.workspace, uri.fsPath)
+          changedFiles.join(", ")
         );
-        this.scheduleCapture();
+        this.changedDocuments.clear();
+        this.scheduleCapture(true);
       })
     );
 
@@ -91,7 +104,7 @@ export class CaptureService implements vscode.Disposable {
         return;
       }
       this.recordEvent("workspaceChanged", relativePath);
-      this.scheduleCapture();
+      this.scheduleCapture(false);
     };
     workspaceWatcher.onDidChange(onWorkspaceChange, undefined, this.disposables);
     workspaceWatcher.onDidCreate(onWorkspaceChange, undefined, this.disposables);
@@ -106,7 +119,7 @@ export class CaptureService implements vscode.Disposable {
     terminalWatcher.onDidChange(
       () => {
         this.recordEvent("terminalLogChanged", ".traceos/terminal.log");
-        this.scheduleCapture();
+        this.scheduleCapture(true);
       },
       undefined,
       this.disposables
@@ -114,7 +127,7 @@ export class CaptureService implements vscode.Disposable {
     terminalWatcher.onDidCreate(
       () => {
         this.recordEvent("terminalLogChanged", ".traceos/terminal.log");
-        this.scheduleCapture();
+        this.scheduleCapture(true);
       },
       undefined,
       this.disposables
@@ -126,10 +139,6 @@ export class CaptureService implements vscode.Disposable {
 
   public get isStarted(): boolean {
     return this.started;
-  }
-
-  public pause(): void {
-    this.disposeListeners();
   }
 
   public async captureSnapshot(): Promise<Snapshot> {
@@ -156,23 +165,36 @@ export class CaptureService implements vscode.Disposable {
   }
 
   public async captureAndSave(
-    options: { forceIngestion?: boolean } = {}
+    options: {
+      forceIngestion?: boolean;
+      onBeforeIngest?: () => Promise<void> | void;
+      notify?: boolean;
+    } = {}
   ): Promise<{
     snapshot: Snapshot;
     ingestion: MemoryIngestionResult;
   }> {
     const snapshot = await this.captureSnapshot();
     await this.sessionStore.append(snapshot);
+    const hasMeaningfulChange = this.hasMeaningfulChange(snapshot);
     const shouldIngest =
-      options.forceIngestion === true || this.hasMeaningfulChange(snapshot);
+      options.forceIngestion === true || hasMeaningfulChange;
+    if (shouldIngest) {
+      await options.onBeforeIngest?.();
+    }
     const ingestion = shouldIngest
       ? await ingestMemory(snapshot, this.workspace)
       : {
+          received: evidenceCounts(snapshot),
           attempted: 0,
           ingested: 0,
+          skippedReasons: ["No meaningful evidence change detected"],
           backendAvailable: true,
           message: "No new diagnostic, git, or terminal evidence to ingest."
         };
+    if (shouldIngest && options.notify !== false) {
+      await this.onIngestion?.(ingestion);
+    }
     return { snapshot, ingestion };
   }
 
@@ -192,16 +214,21 @@ export class CaptureService implements vscode.Disposable {
     this.started = false;
   }
 
-  private scheduleCapture(): void {
+  private scheduleCapture(forceIngestion: boolean): void {
+    this.forceScheduledIngestion ||= forceIngestion;
     if (this.captureTimer) {
       clearTimeout(this.captureTimer);
     }
     this.captureTimer = setTimeout(() => {
       this.captureTimer = undefined;
+      const shouldForceIngestion = this.forceScheduledIngestion;
+      this.forceScheduledIngestion = false;
       this.captureQueue = this.captureQueue
         .then(async () => {
           if (this.started) {
-            await this.captureAndSave();
+            await this.captureAndSave({
+              forceIngestion: shouldForceIngestion
+            });
           }
         })
         .catch((error: unknown) => {
@@ -221,14 +248,6 @@ export class CaptureService implements vscode.Disposable {
       snapshot.git.diff
     ]);
     const terminalFingerprint = fingerprint(snapshot.terminalLog);
-    const hasDiagnosticEvent = snapshot.events.some(
-      (event) => event.type === "diagnosticsChanged"
-    );
-    const now = Date.now();
-    const diagnosticsDue =
-      hasDiagnosticEvent &&
-      now - this.lastDiagnosticIngestionAt >=
-        CaptureService.DIAGNOSTIC_COOLDOWN_MS;
     const gitChanged =
       gitFingerprint !== this.lastGitFingerprint &&
       Boolean(snapshot.git.status || snapshot.git.diff);
@@ -238,11 +257,8 @@ export class CaptureService implements vscode.Disposable {
 
     this.lastGitFingerprint = gitFingerprint;
     this.lastTerminalFingerprint = terminalFingerprint;
-    if (diagnosticsDue) {
-      this.lastDiagnosticIngestionAt = now;
-    }
 
-    return diagnosticsDue || gitChanged || terminalChanged;
+    return gitChanged || terminalChanged;
   }
 
   private recordEvent(
@@ -272,4 +288,15 @@ function getActiveFile(workspace: WorkspaceInfo): string | undefined {
   }
 
   return relativeWorkspacePath(workspace, uri.fsPath);
+}
+
+function evidenceCounts(
+  snapshot: Snapshot
+): MemoryIngestionResult["received"] {
+  return {
+    diagnostics: snapshot.diagnostics.length,
+    gitStatusLength: snapshot.git.status.length,
+    gitDiffLength: snapshot.git.diff.length,
+    terminalLogLength: snapshot.terminalLog.length
+  };
 }

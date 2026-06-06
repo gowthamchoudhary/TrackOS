@@ -22,7 +22,6 @@ export interface AgentLaunchResult {
 
 export async function launchAgent(
   agentId: AgentId,
-  prompt: string,
   workspace: WorkspaceInfo
 ): Promise<AgentLaunchResult> {
   const configuration = vscode.workspace.getConfiguration(
@@ -38,28 +37,18 @@ export async function launchAgent(
     };
   }
 
-  const autoSubmit = configuration.get<boolean>("autoSubmitPrompt", false);
   const terminal = vscode.window.createTerminal({
     name: "TraceOS Agent",
     cwd: workspace.rootPath
   });
 
   terminal.show(true);
-  if (agentId === "custom") {
-    terminal.sendText(command, true);
-    await delay(750);
-    terminal.sendText(prompt, autoSubmit);
-  } else {
-    terminal.sendText(
-      `${command} "${PROMPT_FILE_INSTRUCTION}"`,
-      true
-    );
-  }
+  terminal.sendText(buildLaunchCommand(agentId, command), true);
 
   return {
     command,
     launched: true,
-    autoSubmitted: agentId === "custom" ? autoSubmit : true
+    autoSubmitted: true
   };
 }
 
@@ -131,6 +120,9 @@ function commandExecutable(command: string): string {
   return trimmed.split(/\s+/, 1)[0] ?? "";
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function buildLaunchCommand(agentId: AgentId, command: string): string {
+  const prompt = `"${PROMPT_FILE_INSTRUCTION}"`;
+  return agentId === "gemini"
+    ? `${command} --prompt-interactive ${prompt}`
+    : `${command} ${prompt}`;
 }
