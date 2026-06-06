@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as vscode from "vscode";
 import {
   AgentEvidenceIngestionResult,
@@ -7,11 +8,19 @@ import {
 } from "../types/memory";
 import { Snapshot } from "../types/snapshot";
 import { WorkspaceInfo } from "../utils/workspace";
+import { SessionStore } from "./sessionStore";
 
 const BACKEND_UNAVAILABLE =
   "TraceOS backend unavailable. Running local context only.";
 const REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_BACKEND_URL = "https://trackos-h16r.onrender.com";
+const DEDUPE_WINDOW_MS = 10 * 60 * 1000;
+const ERROR_LIKE_PATTERN =
+  /\b(error|exception|failed|failure|fatal|traceback|typeerror|syntaxerror|npm err!|command not found|module not found|exit code [1-9]\d*)\b/i;
+const SUCCESS_LIKE_PATTERN =
+  /\b(done|complete|completed|success|succeeded|fixed|passed|all tests passed)\b/i;
+const recentFingerprints = new Map<string, number>();
+const previousAgentFailureByWorkspace = new Map<string, boolean>();
 
 interface IngestResponse {
   ok: boolean;
@@ -43,6 +52,18 @@ export async function ingestMemory(
   snapshot: Snapshot,
   workspace: WorkspaceInfo
 ): Promise<MemoryIngestionResult> {
+  const filtering = await filterSnapshotForIngestion(snapshot, workspace);
+  if (!filtering.shouldIngest) {
+    return {
+      received: evidenceCounts(snapshot),
+      attempted: 0,
+      ingested: 0,
+      skippedReasons: filtering.reasons,
+      backendAvailable: true,
+      message: filtering.reasons.join("; ")
+    };
+  }
+
   try {
     const response = await postJson<IngestResponse>(
       workspace,
@@ -50,10 +71,11 @@ export async function ingestMemory(
       {
         userId: getUserId(workspace),
         project: workspace.name,
-        workspaceName: snapshot.workspaceName,
-        snapshot
+        workspaceName: filtering.snapshot.workspaceName,
+        snapshot: filtering.snapshot
       }
     );
+    rememberFingerprints(filtering.fingerprints);
 
     return {
       received: response.received,
@@ -103,6 +125,16 @@ export async function ingestAgentEvidence(
   evidence: AgentRunEvidence,
   workspace: WorkspaceInfo
 ): Promise<AgentEvidenceIngestionResult> {
+  const filtering = filterAgentEvidenceForIngestion(evidence, workspace);
+  if (!filtering.shouldIngest) {
+    return {
+      attempted: 0,
+      ingested: 0,
+      backendAvailable: true,
+      message: filtering.reasons.join("; ")
+    };
+  }
+
   try {
     const response = await postJson<AgentEvidenceResponse>(
       workspace,
@@ -110,8 +142,13 @@ export async function ingestAgentEvidence(
       {
         userId: getUserId(workspace),
         project: workspace.name,
-        evidence
+        evidence: filtering.evidence
       }
+    );
+    rememberFingerprints(filtering.fingerprints);
+    previousAgentFailureByWorkspace.set(
+      workspace.rootPath,
+      evidence.exitCode !== 0
     );
     return {
       attempted: response.attempted,
@@ -130,6 +167,156 @@ export async function ingestAgentEvidence(
       message: `${BACKEND_UNAVAILABLE} ${errorMessage(error)}`
     };
   }
+}
+
+async function filterSnapshotForIngestion(
+  snapshot: Snapshot,
+  workspace: WorkspaceInfo
+): Promise<{
+  shouldIngest: boolean;
+  snapshot: Snapshot;
+  fingerprints: string[];
+  reasons: string[];
+}> {
+  pruneRecentFingerprints();
+  const previous = await new SessionStore(workspace).read();
+  const previousSnapshots = previous.snapshots.filter(
+    (candidate) => candidate.id !== snapshot.id
+  );
+  const repeatedDiagnosticKeys = new Set<string>();
+  for (const previousSnapshot of previousSnapshots) {
+    for (const diagnostic of previousSnapshot.diagnostics) {
+      repeatedDiagnosticKeys.add(diagnosticKey(diagnostic));
+    }
+  }
+
+  const diagnosticEntries = snapshot.diagnostics
+    .filter(
+      (diagnostic) =>
+        diagnostic.severity === "Error" ||
+        repeatedDiagnosticKeys.has(diagnosticKey(diagnostic))
+    )
+    .map((diagnostic) => ({
+      diagnostic,
+      fingerprint: evidenceFingerprint(
+        "diagnostic",
+        diagnostic.filePath,
+        `${diagnostic.severity}:${diagnostic.message}`
+      )
+    }))
+    .filter(({ fingerprint }) => !wasRecentlyIngested(fingerprint));
+
+  const gitHasMeaningfulDiff = isMeaningfulDiff(snapshot.git.diff);
+  const gitHasImportantFile = snapshot.git.changedFiles.some(isImportantFile);
+  const gitFingerprint = evidenceFingerprint(
+    "git_diff",
+    snapshot.git.changedFiles.join(","),
+    snapshot.git.diff || snapshot.git.status
+  );
+  const includeGit =
+    (gitHasMeaningfulDiff || gitHasImportantFile) &&
+    !wasRecentlyIngested(gitFingerprint);
+
+  const terminalHasSignal = ERROR_LIKE_PATTERN.test(snapshot.terminalLog);
+  const terminalFingerprint = evidenceFingerprint(
+    "terminal_log",
+    ".traceos/terminal.log",
+    signalSnippet(snapshot.terminalLog)
+  );
+  const includeTerminal =
+    terminalHasSignal && !wasRecentlyIngested(terminalFingerprint);
+
+  const filteredSnapshot: Snapshot = {
+    ...snapshot,
+    diagnostics: diagnosticEntries.map(({ diagnostic }) => diagnostic),
+    git: includeGit
+      ? snapshot.git
+      : {
+          ...snapshot.git,
+          status: "",
+          diffStat: "",
+          diff: "",
+          changedFiles: []
+        },
+    terminalLog: includeTerminal ? snapshot.terminalLog : ""
+  };
+  const fingerprints = [
+    ...diagnosticEntries.map(({ fingerprint }) => fingerprint),
+    includeGit ? gitFingerprint : undefined,
+    includeTerminal ? terminalFingerprint : undefined
+  ].filter((value): value is string => Boolean(value));
+  const hasSignal =
+    filteredSnapshot.diagnostics.length > 0 ||
+    Boolean(filteredSnapshot.git.diff || filteredSnapshot.git.status) ||
+    Boolean(filteredSnapshot.terminalLog);
+
+  if (!hasSignal) {
+    return {
+      shouldIngest: false,
+      snapshot: filteredSnapshot,
+      fingerprints,
+      reasons: ["No memory-worthy evidence after TraceOS filtering"]
+    };
+  }
+
+  return {
+    shouldIngest: true,
+    snapshot: filteredSnapshot,
+    fingerprints,
+    reasons: []
+  };
+}
+
+function filterAgentEvidenceForIngestion(
+  evidence: AgentRunEvidence,
+  workspace: WorkspaceInfo
+): {
+  shouldIngest: boolean;
+  evidence: AgentRunEvidence;
+  fingerprints: string[];
+  reasons: string[];
+} {
+  pruneRecentFingerprints();
+  const hadPreviousFailure =
+    previousAgentFailureByWorkspace.get(workspace.rootPath) === true;
+  const outputHasError = ERROR_LIKE_PATTERN.test(evidence.output);
+  const nonZeroExit = evidence.exitCode !== 0;
+  const successAfterFailure =
+    hadPreviousFailure && evidence.exitCode === 0 && SUCCESS_LIKE_PATTERN.test(evidence.output);
+  const fingerprint = evidenceFingerprint(
+    nonZeroExit ? "agent_command_failure" : "agent_output",
+    evidence.command,
+    signalSnippet(evidence.output || evidence.stderr)
+  );
+
+  previousAgentFailureByWorkspace.set(workspace.rootPath, nonZeroExit);
+  if (
+    !outputHasError &&
+    !nonZeroExit &&
+    !successAfterFailure
+  ) {
+    return {
+      shouldIngest: false,
+      evidence,
+      fingerprints: [],
+      reasons: ["Agent output had no useful memory signal"]
+    };
+  }
+  if (wasRecentlyIngested(fingerprint)) {
+    return {
+      shouldIngest: false,
+      evidence,
+      fingerprints: [fingerprint],
+      reasons: ["Duplicate agent output memory recently ingested"]
+    };
+  }
+
+  return {
+    shouldIngest: true,
+    evidence,
+    fingerprints: [fingerprint],
+    reasons: []
+  };
 }
 
 export async function testBackend(
@@ -226,4 +413,81 @@ function evidenceCounts(
     gitDiffLength: snapshot.git.diff.length,
     terminalLogLength: snapshot.terminalLog.length
   };
+}
+
+function diagnosticKey(diagnostic: Snapshot["diagnostics"][number]): string {
+  return JSON.stringify([
+    diagnostic.filePath,
+    diagnostic.line,
+    diagnostic.character,
+    diagnostic.severity,
+    diagnostic.message,
+    diagnostic.source ?? "",
+    diagnostic.code ?? ""
+  ]);
+}
+
+function isMeaningfulDiff(diff: string): boolean {
+  if (!diff.trim()) {
+    return false;
+  }
+  return /^(?:\+|-)(?![+-]{2,3}|$).+/m.test(diff);
+}
+
+function isImportantFile(filePath: string): boolean {
+  return (
+    filePath.startsWith("src/") ||
+    filePath === "package.json" ||
+    filePath === "tsconfig.json"
+  );
+}
+
+function signalSnippet(value: string): string {
+  const line =
+    value
+      .split(/\r?\n/)
+      .find((candidate) => ERROR_LIKE_PATTERN.test(candidate)) ??
+    value.slice(0, 500);
+  return line.trim().slice(0, 500);
+}
+
+function evidenceFingerprint(
+  eventType: string,
+  filePath: string,
+  evidence: string
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        eventType,
+        filePath,
+        createHash("sha256").update(evidence).digest("hex")
+      ])
+    )
+    .digest("hex");
+}
+
+function wasRecentlyIngested(fingerprint: string): boolean {
+  const ingestedAt = recentFingerprints.get(fingerprint);
+  return (
+    ingestedAt !== undefined &&
+    Date.now() - ingestedAt < DEDUPE_WINDOW_MS
+  );
+}
+
+function rememberFingerprints(fingerprints: string[]): void {
+  const now = Date.now();
+  for (const fingerprint of fingerprints) {
+    recentFingerprints.set(fingerprint, now);
+  }
+  pruneRecentFingerprints();
+}
+
+function pruneRecentFingerprints(): void {
+  const now = Date.now();
+  for (const [fingerprint, ingestedAt] of recentFingerprints) {
+    if (now - ingestedAt >= DEDUPE_WINDOW_MS) {
+      recentFingerprints.delete(fingerprint);
+    }
+  }
 }

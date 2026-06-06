@@ -1,7 +1,22 @@
-import { MemoryRecallResult, TraceMemory } from "../types/memory";
+import {
+  MemoryRecallResult,
+  TraceMemory,
+  TraceMemoryEventType
+} from "../types/memory";
 import { DiagnosticEvidence, Snapshot } from "../types/snapshot";
 
-const MAX_DIFF_CHARACTERS = 20_000;
+const MAX_SNIPPET_CHARACTERS = 900;
+const RELEVANT_MEMORY_TYPES = new Set<TraceMemoryEventType>([
+  "failure",
+  "fix",
+  "diagnostic",
+  "agent_error",
+  "agent_command_failure",
+  "terminal_log",
+  "pattern"
+]);
+const ERROR_LIKE_PATTERN =
+  /\b(error|exception|failed|failure|fatal|traceback|typeerror|syntaxerror|npm err!|command not found|module not found|exit code [1-9]\d*)\b/i;
 
 export function assembleContext(
   request: string,
@@ -84,19 +99,19 @@ function formatGitDiff(snapshot: Snapshot): string {
   }
 
   const parts: string[] = [];
+  if (snapshot.git.changedFiles.length > 0) {
+    parts.push(`Changed files: ${snapshot.git.changedFiles.join(", ")}`);
+  }
   if (snapshot.git.diffStat) {
     parts.push("### Diff Stat", fenced("text", snapshot.git.diffStat));
   }
-
-  if (snapshot.git.diff) {
-    parts.push("### Exact Diff");
-    if (snapshot.git.diff.length <= MAX_DIFF_CHARACTERS) {
-      parts.push(fenced("diff", snapshot.git.diff));
-    } else {
-      parts.push(
-        `Full diff omitted because it is ${snapshot.git.diff.length} characters, above the ${MAX_DIFF_CHARACTERS} character context limit.`
-      );
-    }
+  if (snapshot.git.diff && hasErrorLikeDiffLine(snapshot.git.diff)) {
+    parts.push(
+      "### Relevant Diff Snippet",
+      fenced("diff", firstMatchingLines(snapshot.git.diff, ERROR_LIKE_PATTERN))
+    );
+  } else if (snapshot.git.diff) {
+    parts.push("Exact diff omitted by default; use git status and diff stat unless exact code is requested.");
   }
 
   return parts.join("\n\n");
@@ -166,21 +181,98 @@ function formatMemories(recall: MemoryRecallResult): string {
     return "No relevant managed memories were retrieved.";
   }
 
-  return recall.memories.map(formatMemory).join("\n\n");
+  const memories = recall.memories
+    .filter(isRelevantMemory)
+    .sort(memoryPriority)
+    .slice(0, 8);
+
+  if (memories.length === 0) {
+    return "Retrieved managed memories did not match TraceOS relevance filters.";
+  }
+
+  return memories.map(formatMemory).join("\n\n");
 }
 
 function formatMemory(memory: TraceMemory): string {
+  const evidence = summarizeMemoryEvidence(memory);
   const details = [
     `### ${memory.label}`,
     "",
     `* Event type: ${memory.eventType}`,
     `* Timestamp: ${memory.timestamp || "Not provided."}`,
     memory.filePath ? `* File: ${memory.filePath}` : undefined,
+    memory.summary ? `* Summary: ${memory.summary}` : undefined,
     "",
-    memory.rawEvidence
+    evidence
   ];
 
   return details.filter((item): item is string => item !== undefined).join("\n");
+}
+
+function isRelevantMemory(memory: TraceMemory): boolean {
+  if (RELEVANT_MEMORY_TYPES.has(memory.eventType)) {
+    return true;
+  }
+  if (memory.importance === "high") {
+    return true;
+  }
+  return ERROR_LIKE_PATTERN.test(memory.summary) || ERROR_LIKE_PATTERN.test(memory.rawEvidence);
+}
+
+function memoryPriority(a: TraceMemory, b: TraceMemory): number {
+  return scoreMemory(b) - scoreMemory(a);
+}
+
+function scoreMemory(memory: TraceMemory): number {
+  let score = 0;
+  if (memory.importance === "high") {
+    score += 5;
+  }
+  if (memory.eventType === "agent_error" || memory.eventType === "agent_command_failure") {
+    score += 4;
+  }
+  if (memory.eventType === "failure" || memory.eventType === "fix") {
+    score += 3;
+  }
+  if (memory.eventType === "pattern" || memory.eventType === "diagnostic") {
+    score += 2;
+  }
+  if (ERROR_LIKE_PATTERN.test(memory.summary) || ERROR_LIKE_PATTERN.test(memory.rawEvidence)) {
+    score += 1;
+  }
+  return score;
+}
+
+function summarizeMemoryEvidence(memory: TraceMemory): string {
+  if (!memory.rawEvidence) {
+    return "No raw evidence attached.";
+  }
+  if (memory.eventType === "git_diff") {
+    return "Raw git diff omitted from managed context by default.";
+  }
+
+  const snippet = ERROR_LIKE_PATTERN.test(memory.rawEvidence)
+    ? firstMatchingLines(memory.rawEvidence, ERROR_LIKE_PATTERN)
+    : memory.rawEvidence.trim().slice(0, MAX_SNIPPET_CHARACTERS);
+  return fenced("text", snippet || memory.summary || "No concise evidence snippet available.");
+}
+
+function hasErrorLikeDiffLine(diff: string): boolean {
+  return diff.split(/\r?\n/).some((line) => ERROR_LIKE_PATTERN.test(line));
+}
+
+function firstMatchingLines(value: string, pattern: RegExp): string {
+  const lines = value.split(/\r?\n/);
+  const snippets: string[] = [];
+  for (const line of lines) {
+    if (pattern.test(line)) {
+      snippets.push(line.slice(0, 300));
+    }
+    if (snippets.join("\n").length >= MAX_SNIPPET_CHARACTERS) {
+      break;
+    }
+  }
+  return snippets.join("\n").slice(0, MAX_SNIPPET_CHARACTERS);
 }
 
 function fenced(language: string, content: string): string {

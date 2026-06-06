@@ -25,6 +25,11 @@ export type AgentRunResult =
       evidence: AgentRunEvidence;
     };
 
+export interface AgentRunCallbacks {
+  onStarted?: () => Promise<void> | void;
+  onOutput?: (text: string) => Promise<void> | void;
+}
+
 interface SpawnCommand {
   executable: string;
   args: string[];
@@ -62,7 +67,8 @@ export class AgentRunner implements vscode.Disposable {
 
   public async run(
     agentId: AgentId,
-    workspace: WorkspaceInfo
+    workspace: WorkspaceInfo,
+    callbacks: AgentRunCallbacks = {}
   ): Promise<AgentRunResult> {
     if (this.activeProcess) {
       throw new Error("A TraceOS agent session is already running.");
@@ -116,6 +122,7 @@ export class AgentRunner implements vscode.Disposable {
         stdio: ["pipe", "pipe", "pipe"]
       });
       this.activeProcess = child;
+      await callbacks.onStarted?.();
     } catch (error) {
       const message = `[TraceOS] Failed to start agent: ${errorMessage(error)}\n`;
       logStream.end(message);
@@ -138,6 +145,7 @@ export class AgentRunner implements vscode.Disposable {
       outputChunks.push(text);
       logStream.write(text);
       this.output.append(text);
+      void callbacks.onOutput?.(text);
     };
     const childStdout = child.stdout;
     const childStderr = child.stderr;

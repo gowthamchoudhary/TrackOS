@@ -63,6 +63,12 @@ export async function activate(
     vscode.commands.registerCommand("traceos.ingestSnapshotToBackend", () =>
       runCommand(ingestSnapshotToBackend)
     ),
+    vscode.commands.registerCommand("traceos.viewAgentOutput", () =>
+      agentOutput.show(true)
+    ),
+    vscode.commands.registerCommand("traceos.openSessionLog", () =>
+      runCommand(openSessionLog)
+    ),
     vscode.workspace.onDidChangeWorkspaceFolders((event) => {
       for (const removed of event.removed) {
         const service = captureServices.get(removed.uri.fsPath);
@@ -142,7 +148,25 @@ async function runWithTraceosMemory(
     selectedAgent: agentId,
     latestEvent: "Launching the selected agent with TraceOS memory."
   });
-  const run = await agentRunner.run(agentId, workspace);
+  let outputReported = false;
+  const run = await agentRunner.run(agentId, workspace, {
+    onStarted: () =>
+      reportStatus({
+        phase: "running",
+        selectedAgent: agentId,
+        latestEvent: "Agent running."
+      }),
+    onOutput: () => {
+      if (outputReported) {
+        return;
+      }
+      outputReported = true;
+      void reportStatus({
+        phase: "running",
+        latestEvent: "Agent output streaming."
+      });
+    }
+  });
   if (!run.launched) {
     await handleMissingAgent(run.command, prompt, workspace);
     await reportStatus({
@@ -153,17 +177,27 @@ async function runWithTraceosMemory(
     return "CLI missing, prompt copied";
   }
 
+  const agentFailed = run.evidence.exitCode !== 0;
   await reportStatus({
-    phase: "syncing",
-    latestEvent: "Agent completed. Storing captured output."
+    phase: agentFailed ? "error" : "syncing",
+    latestEvent: agentFailed
+      ? "Agent failed. Storing captured output."
+      : "Agent completed. Storing captured output.",
+    latestError: agentFailed
+      ? `Agent exited with code ${String(run.evidence.exitCode)}.`
+      : undefined
   });
   const ingestion = await ingestAgentEvidence(run.evidence, workspace);
   if (!ingestion.backendAvailable) {
     await reportStatus({
-      phase: "error",
+      phase: agentFailed ? "error" : "ready",
       backendConnected: false,
-      latestEvent: "Agent output remains available locally.",
-      latestError: ingestion.message
+      latestEvent: agentFailed
+        ? "Agent failed. Output remains available locally."
+        : "Agent completed. Output remains available locally.",
+      latestError: agentFailed
+        ? `Agent exited with code ${String(run.evidence.exitCode)}. ${ingestion.message}`
+        : ingestion.message
     });
   } else {
     await reportStatus({
@@ -171,15 +205,17 @@ async function runWithTraceosMemory(
       backendConnected: true,
       memoriesStored: ingestion.ingested,
       lastSync: new Date().toISOString(),
-      latestEvent: `Captured agent output stored as ${ingestion.ingested} memory item${plural(ingestion.ingested)}.`,
-      latestError: undefined
+      latestEvent: agentFailed
+        ? `Agent failed; captured output stored as ${ingestion.ingested} memory item${plural(ingestion.ingested)}.`
+        : `Agent completed; captured output stored as ${ingestion.ingested} memory item${plural(ingestion.ingested)}.`,
+      latestError: agentFailed
+        ? `Agent exited with code ${String(run.evidence.exitCode)}. Captured output is in TraceOS Agent and .traceos/agent-session.log.`
+        : undefined
     });
   }
 
-  if (run.evidence.exitCode !== 0) {
-    throw new Error(
-      `Agent exited with code ${String(run.evidence.exitCode)}. Captured output is in TraceOS Agent and .traceos/agent-session.log.`
-    );
+  if (agentFailed) {
+    return `Agent failed with code ${String(run.evidence.exitCode)}; output captured`;
   }
 
   return ingestion.backendAvailable
@@ -326,6 +362,25 @@ async function ingestSnapshotToBackend(): Promise<void> {
   void vscode.window.showInformationMessage(
     `TraceOS sent ${result.ingested} memory item${plural(result.ingested)} from the latest snapshot to the managed backend.`
   );
+}
+
+async function openSessionLog(): Promise<void> {
+  const workspace = requireWorkspace();
+  if (!workspace) {
+    return;
+  }
+
+  try {
+    const document = await vscode.workspace.openTextDocument(
+      vscode.Uri.file(workspace.agentSessionLogFile)
+    );
+    await vscode.window.showTextDocument(document);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showWarningMessage(
+      `TraceOS session log is not available yet: ${message}`
+    );
+  }
 }
 
 function getCaptureService(workspace: WorkspaceInfo): CaptureService {

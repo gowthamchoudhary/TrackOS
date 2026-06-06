@@ -7,12 +7,18 @@ interface RunRequestMessage {
   agentId: AgentId;
 }
 
+interface CommandMessage {
+  type: "command";
+  command: "viewAgentOutput" | "openSessionLog";
+}
+
 export type TraceosPhase =
   | "ready"
   | "capturing"
   | "syncing"
   | "context"
   | "launching"
+  | "running"
   | "error";
 
 export interface TraceosSidebarState {
@@ -66,6 +72,11 @@ export class TraceosViewProvider implements vscode.WebviewViewProvider {
     void postState(webviewView.webview, this.state);
 
     webviewView.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (isCommandMessage(message)) {
+        await vscode.commands.executeCommand(`traceos.${message.command}`);
+        return;
+      }
+
       if (!isRunRequest(message)) {
         return;
       }
@@ -155,6 +166,19 @@ function isRunRequest(message: unknown): message is RunRequestMessage {
   );
 }
 
+function isCommandMessage(message: unknown): message is CommandMessage {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+
+  const candidate = message as Partial<CommandMessage>;
+  return (
+    candidate.type === "command" &&
+    (candidate.command === "viewAgentOutput" ||
+      candidate.command === "openSessionLog")
+  );
+}
+
 function isAgentId(value: unknown): value is AgentId {
   return (
     value === "claude" ||
@@ -237,7 +261,8 @@ function getHtml(webview: vscode.Webview): string {
     .pill[data-phase="capturing"],
     .pill[data-phase="syncing"],
     .pill[data-phase="context"],
-    .pill[data-phase="launching"] {
+    .pill[data-phase="launching"],
+    .pill[data-phase="running"] {
       border-color: var(--vscode-focusBorder);
     }
     .pill[data-phase="error"] {
@@ -329,6 +354,10 @@ function getHtml(webview: vscode.Webview): string {
     .field + .field {
       margin-top: 14px;
     }
+    .button-stack {
+      display: grid;
+      gap: 8px;
+    }
     .helper {
       margin: 7px 0 0;
       color: var(--vscode-descriptionForeground);
@@ -369,6 +398,14 @@ function getHtml(webview: vscode.Webview): string {
     button:disabled {
       cursor: progress;
       opacity: 0.68;
+    }
+    .secondary-button {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+      border-color: var(--vscode-widget-border, transparent);
+    }
+    .secondary-button:hover {
+      background: var(--vscode-button-secondaryHoverBackground);
     }
     .status-grid {
       display: grid;
@@ -477,7 +514,11 @@ function getHtml(webview: vscode.Webview): string {
       </div>
     </section>
 
-    <button id="run" type="button">Run With Memory</button>
+    <div class="button-stack">
+      <button id="run" type="button">Run With Memory</button>
+      <button id="viewOutput" class="secondary-button" type="button">View Agent Output</button>
+      <button id="openLog" class="secondary-button" type="button">Open Session Log</button>
+    </div>
 
     <section class="card" aria-live="polite" aria-atomic="true">
       <div class="card-body status-grid">
@@ -508,6 +549,8 @@ function getHtml(webview: vscode.Webview): string {
       request: document.getElementById("request"),
       agent: document.getElementById("agent"),
       run: document.getElementById("run"),
+      viewOutput: document.getElementById("viewOutput"),
+      openLog: document.getElementById("openLog"),
       phasePill: document.getElementById("phasePill"),
       memoriesStored: document.getElementById("memoriesStored"),
       lastSync: document.getElementById("lastSync"),
@@ -525,6 +568,7 @@ function getHtml(webview: vscode.Webview): string {
       syncing: "Syncing",
       context: "Building Context",
       launching: "Launching Agent",
+      running: "Agent Running",
       error: "Error"
     };
     const buttonLabels = {
@@ -533,6 +577,7 @@ function getHtml(webview: vscode.Webview): string {
       syncing: "Syncing Memory…",
       context: "Building Context…",
       launching: "Launching Agent…",
+      running: "Agent Running…",
       error: "Run With Memory"
     };
     const agentLabels = {
@@ -610,6 +655,12 @@ function getHtml(webview: vscode.Webview): string {
     }
 
     elements.run.addEventListener("click", submitRequest);
+    elements.viewOutput.addEventListener("click", () => {
+      vscode.postMessage({ type: "command", command: "viewAgentOutput" });
+    });
+    elements.openLog.addEventListener("click", () => {
+      vscode.postMessage({ type: "command", command: "openSessionLog" });
+    });
     elements.request.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && event.ctrlKey) {
         event.preventDefault();
