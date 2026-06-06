@@ -68,6 +68,11 @@
           "type": "string",
           "default": "",
           "description": "Terminal command used when Custom command is selected in the TraceOS sidebar"
+        },
+        "traceos.autoSubmitPrompt": {
+          "type": "boolean",
+          "default": false,
+          "description": "Submit the TraceOS prompt after the validated agent command starts. When false, the prompt is inserted without pressing Enter."
         }
       }
     }

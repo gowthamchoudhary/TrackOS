@@ -1,6 +1,11 @@
 import { promises as fs } from "node:fs";
 import * as vscode from "vscode";
-import { AgentId, launchAgent } from "./services/agentRouter";
+import {
+  AgentId,
+  buildAgentPrompt,
+  launchAgent,
+  resolveAgentCommand
+} from "./services/agentRouter";
 import { CaptureService } from "./services/captureService";
 import {
   assembleManagedContext,
@@ -156,9 +161,41 @@ async function runWithTraceosMemory(
     throw new Error("TraceOS requires an open file-system workspace folder.");
   }
 
+  const configuration = vscode.workspace.getConfiguration(
+    "traceos",
+    workspace.folder.uri
+  );
+  resolveAgentCommand(agentId, configuration);
   await generateContext(request, workspace);
   const launch = await launchAgent(agentId, request, workspace);
-  return `Started "${launch.command}" with TraceOS memory.`;
+  if (!launch.launched) {
+    await handleMissingAgent(launch.command, request, workspace);
+    return "Agent CLI not found. Context generated and prompt copied.";
+  }
+
+  return launch.autoSubmitted
+    ? `Started "${launch.command}" and submitted the TraceOS prompt.`
+    : `Started "${launch.command}" and inserted the TraceOS prompt.`;
+}
+
+async function handleMissingAgent(
+  command: string,
+  request: string,
+  workspace: WorkspaceInfo
+): Promise<void> {
+  const missingMessage =
+    `Selected agent command '${command}' was not found. ` +
+    "Install it or choose Custom with a valid command.";
+  void vscode.window.showErrorMessage(missingMessage);
+
+  const document = await vscode.workspace.openTextDocument(
+    vscode.Uri.file(workspace.contextFile)
+  );
+  await vscode.window.showTextDocument(document);
+  await vscode.env.clipboard.writeText(buildAgentPrompt(request));
+  void vscode.window.showInformationMessage(
+    "Agent CLI not found. Context generated and prompt copied."
+  );
 }
 
 async function generateContext(

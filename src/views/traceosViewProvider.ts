@@ -127,6 +127,12 @@ function getHtml(webview: vscode.Webview): string {
     .field {
       margin-bottom: 14px;
     }
+    .agent-help {
+      margin: -6px 0 14px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      line-height: 1.5;
+    }
     button {
       width: 100%;
       padding: 8px 12px;
@@ -168,6 +174,10 @@ function getHtml(webview: vscode.Webview): string {
       <option value="gemini">Gemini CLI</option>
       <option value="custom">Custom command</option>
     </select>
+  </div>
+  <div class="agent-help">
+    Claude Code requires <code>claude</code>. Codex requires
+    <code>codex</code>. Gemini requires <code>gemini</code>.
   </div>
   <button id="run">Run With TraceOS Memory</button>
   <div id="status" role="status" aria-live="polite"></div>

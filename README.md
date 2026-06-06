@@ -58,6 +58,12 @@ same diagnostic in more than one distinct snapshot.
 - `traceos.backendUrl` defaults to `https://trackos-h16r.onrender.com`
 - `traceos.userId` defaults to `local_user`
 - `traceos.customAgentCommand`
+- `traceos.autoSubmitPrompt` defaults to `false`
+
+TraceOS validates the selected CLI before opening an agent terminal. Claude
+Code requires `claude`, Codex requires `codex`, and Gemini requires `gemini`.
+If a CLI is unavailable, TraceOS opens the generated context and copies the
+agent prompt instead of sending prompt text to a shell.
 
 The extension contains no HydraDB credentials. If managed ingestion or recall
 fails, TraceOS reports the error and does not start the selected agent with
