@@ -66,5 +66,6 @@ If a CLI is unavailable, TraceOS opens the generated context and copies the
 agent prompt instead of sending prompt text to a shell.
 
 The extension contains no HydraDB credentials. If managed ingestion or recall
-fails, TraceOS reports the error and does not start the selected agent with
-incomplete memory.
+fails, TraceOS still writes a local context from exact workspace evidence. It
+then launches an installed agent CLI, or opens the context and copies the
+prepared prompt when the selected CLI is unavailable.

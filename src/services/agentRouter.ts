@@ -20,7 +20,7 @@ export interface AgentLaunchResult {
 
 export async function launchAgent(
   agentId: AgentId,
-  request: string,
+  prompt: string,
   workspace: WorkspaceInfo
 ): Promise<AgentLaunchResult> {
   const configuration = vscode.workspace.getConfiguration(
@@ -45,7 +45,7 @@ export async function launchAgent(
   terminal.show(true);
   terminal.sendText(command, true);
   await delay(750);
-  terminal.sendText(buildAgentPrompt(request), autoSubmit);
+  terminal.sendText(prompt, autoSubmit);
 
   return {
     command,

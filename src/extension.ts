@@ -3,8 +3,7 @@ import * as vscode from "vscode";
 import {
   AgentId,
   buildAgentPrompt,
-  launchAgent,
-  resolveAgentCommand
+  launchAgent
 } from "./services/agentRouter";
 import { CaptureService } from "./services/captureService";
 import {
@@ -12,13 +11,17 @@ import {
   ingestMemory,
   testBackend
 } from "./services/memoryService";
+import { assembleContext } from "./services/contextAssembler";
 import { SessionStore } from "./services/sessionStore";
 import {
   WorkspaceInfo,
   getCurrentWorkspace,
   getFileSystemWorkspaces
 } from "./utils/workspace";
-import { TraceosViewProvider } from "./views/traceosViewProvider";
+import {
+  TraceosRunStatus,
+  TraceosViewProvider
+} from "./views/traceosViewProvider";
 
 const captureServices = new Map<string, CaptureService>();
 const PRIVACY_NOTICE_KEY = "traceos.privacyNoticeShown";
@@ -154,48 +157,45 @@ async function snapshotState(): Promise<void> {
 
 async function runWithTraceosMemory(
   request: string,
-  agentId: AgentId
+  agentId: AgentId,
+  reportStatus: (status: TraceosRunStatus) => Promise<void>
 ): Promise<string> {
   const workspace = requireWorkspace();
   if (!workspace) {
     throw new Error("TraceOS requires an open file-system workspace folder.");
   }
 
-  const configuration = vscode.workspace.getConfiguration(
-    "traceos",
-    workspace.folder.uri
-  );
-  resolveAgentCommand(agentId, configuration);
   await generateContext(request, workspace);
-  const launch = await launchAgent(agentId, request, workspace);
+  const prompt = buildAgentPrompt(request);
+  await reportStatus("Context generated");
+
+  const launch = await launchAgent(agentId, prompt, workspace);
   if (!launch.launched) {
-    await handleMissingAgent(launch.command, request, workspace);
-    return "Agent CLI not found. Context generated and prompt copied.";
+    await handleMissingAgent(launch.command, prompt, workspace);
+    await reportStatus("CLI missing, prompt copied");
+    return "CLI missing, prompt copied";
   }
 
-  return launch.autoSubmitted
-    ? `Started "${launch.command}" and submitted the TraceOS prompt.`
-    : `Started "${launch.command}" and inserted the TraceOS prompt.`;
+  await reportStatus("Agent launched");
+  return "Agent launched";
 }
 
 async function handleMissingAgent(
   command: string,
-  request: string,
+  prompt: string,
   workspace: WorkspaceInfo
 ): Promise<void> {
   const missingMessage =
-    `Selected agent command '${command}' was not found. ` +
-    "Install it or choose Custom with a valid command.";
-  void vscode.window.showErrorMessage(missingMessage);
+    `Selected agent CLI '${command}' was not found. ` +
+    "TraceOS generated context and copied the prompt. " +
+    "Install the CLI or choose Custom command.";
 
   const document = await vscode.workspace.openTextDocument(
     vscode.Uri.file(workspace.contextFile)
   );
   await vscode.window.showTextDocument(document);
-  await vscode.env.clipboard.writeText(buildAgentPrompt(request));
-  void vscode.window.showInformationMessage(
-    "Agent CLI not found. Context generated and prompt copied."
-  );
+  await vscode.env.clipboard.writeText(prompt);
+  void vscode.window.showWarningMessage(missingMessage);
 }
 
 async function generateContext(
@@ -205,20 +205,35 @@ async function generateContext(
   const { snapshot, ingestion } = await getCaptureService(
     workspace
   ).captureAndSave({ forceIngestion: true });
-  if (!ingestion.backendAvailable) {
-    throw new Error(
-      "Managed TraceOS backend ingestion failed. The agent was not started."
+  const managedMarkdown = await assembleManagedContext(
+    request,
+    snapshot,
+    workspace
+  );
+  const markdown =
+    managedMarkdown ??
+    assembleContext(
+      request,
+      snapshot,
+      await getPreviousSnapshots(workspace, snapshot.id),
+      {
+        memories: [],
+        hydraAvailable: false,
+        message: ingestion.message
+      }
     );
-  }
-
-  const markdown = await assembleManagedContext(request, snapshot, workspace);
-  if (!markdown) {
-    throw new Error(
-      "Managed TraceOS memory recall failed. The agent was not started."
-    );
-  }
 
   await fs.writeFile(workspace.contextFile, markdown, "utf8");
+}
+
+async function getPreviousSnapshots(
+  workspace: WorkspaceInfo,
+  currentSnapshotId: string
+): Promise<import("./types/snapshot").Snapshot[]> {
+  const session = await new SessionStore(workspace).read();
+  return session.snapshots.filter(
+    (snapshot) => snapshot.id !== currentSnapshotId
+  );
 }
 
 async function testBackendConnection(): Promise<void> {

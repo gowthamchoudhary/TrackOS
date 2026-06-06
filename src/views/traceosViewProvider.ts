@@ -9,8 +9,15 @@ interface RunRequestMessage {
 
 export type TraceosRunHandler = (
   request: string,
-  agentId: AgentId
+  agentId: AgentId,
+  reportStatus: (status: TraceosRunStatus) => Promise<void>
 ) => Promise<string>;
+
+export type TraceosRunStatus =
+  | "Capturing..."
+  | "Context generated"
+  | "Agent launched"
+  | "CLI missing, prompt copied";
 
 export class TraceosViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "traceos.sidebar";
@@ -40,11 +47,17 @@ export class TraceosViewProvider implements vscode.WebviewViewProvider {
       await postStatus(
         webviewView.webview,
         "running",
-        "Capturing evidence and preparing TraceOS memory..."
+        "Capturing..."
       );
 
       try {
-        const status = await this.runHandler(request, message.agentId);
+        const status = await this.runHandler(
+          request,
+          message.agentId,
+          async (runStatus) => {
+            await postStatus(webviewView.webview, "running", runStatus);
+          }
+        );
         await postStatus(webviewView.webview, "success", status);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -176,11 +189,12 @@ function getHtml(webview: vscode.Webview): string {
     </select>
   </div>
   <div class="agent-help">
-    Claude Code requires <code>claude</code>. Codex requires
-    <code>codex</code>. Gemini requires <code>gemini</code>.
+    Terminal agents require installed CLIs: <code>claude</code>,
+    <code>codex</code>, <code>gemini</code>. If unavailable, TraceOS copies
+    the prepared prompt.
   </div>
   <button id="run">Run With TraceOS Memory</button>
-  <div id="status" role="status" aria-live="polite"></div>
+  <div id="status" role="status" aria-live="polite">Ready</div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
