@@ -10,6 +10,24 @@ export interface HydraConnection {
   subTenantId: string;
 }
 
+interface HydraMemoryMetadata {
+  event_type: TraceMemoryEventType;
+  project: string;
+}
+
+interface HydraMemoryItem {
+  id: string;
+  label: string;
+  text: string;
+  is_markdown: true;
+  infer: boolean;
+  metadata: HydraMemoryMetadata;
+  additional_metadata: Record<string, unknown>;
+  relations?: {
+    ids: string[];
+  };
+}
+
 export function isHydraConfigured(): boolean {
   return Boolean(process.env.HYDRA_DB_API_KEY?.trim());
 }
@@ -31,35 +49,36 @@ export function getHydraConnection(
 }
 
 export function buildHydraMemoryPayload(memories: TraceMemory[]): string {
-  return JSON.stringify(
-    memories.map((memory) => {
-      const additionalMetadata: Record<string, unknown> = {
-        tags: memory.tags ?? [],
-        importance: memory.importance ?? "medium",
-        timestamp: memory.timestamp
-      };
+  const items: HydraMemoryItem[] = memories.map((memory) => {
+    const additionalMetadata: Record<string, unknown> = {
+      tags: memory.tags ?? [],
+      importance: memory.importance ?? "medium",
+      timestamp: memory.timestamp
+    };
 
-      if (memory.filePath) {
-        additionalMetadata.file_path = memory.filePath;
-      }
+    if (memory.filePath) {
+      additionalMetadata.file_path = memory.filePath;
+    }
 
-      return {
-        id: memory.id,
-        label: memory.label,
-        text: formatMemoryText(memory),
-        is_markdown: true,
-        infer: memory.infer,
-        metadata: JSON.stringify({
-          event_type: memory.eventType,
-          project: memory.project
-        }),
-        additional_metadata: additionalMetadata,
-        ...(memory.relatedIds?.length
-          ? { relations: { ids: memory.relatedIds } }
-          : {})
-      };
-    })
-  );
+    return {
+      id: memory.id,
+      label: memory.label,
+      text: formatMemoryText(memory),
+      is_markdown: true,
+      infer: memory.infer,
+      // Live HydraDB SDK expects metadata as an object inside the JSON-stringified memories array.
+      metadata: {
+        event_type: memory.eventType,
+        project: memory.project
+      },
+      additional_metadata: additionalMetadata,
+      ...(memory.relatedIds?.length
+        ? { relations: { ids: memory.relatedIds } }
+        : {})
+    };
+  });
+
+  return JSON.stringify(items);
 }
 
 export function logHydraIngestRequest(

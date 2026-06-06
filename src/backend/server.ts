@@ -3,11 +3,7 @@ import { assembleContext } from "../services/contextAssembler";
 import { Snapshot } from "../types/snapshot";
 import { DiagnosticRegistry } from "./diagnosticRegistry";
 import { isHydraConfigured } from "./hydraClient";
-import {
-  ingestMemory,
-  recallRelevantContext,
-  testHydraMetadataFormats
-} from "./memoryService";
+import { ingestMemory, recallRelevantContext } from "./memoryService";
 
 const PORT = readPort(process.env.PORT);
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -25,11 +21,6 @@ interface AssembleBody {
   project: string;
   request: string;
   snapshot: Snapshot;
-}
-
-interface HydraFormatTestBody {
-  userId: string;
-  project: string;
 }
 
 const server = createServer(async (request, response) => {
@@ -85,17 +76,6 @@ async function route(
       registry
     );
     sendJson(response, 200, { ok: true, ...result });
-    return;
-  }
-
-  // Remove /api/debug/hydra-format-test before production publishing.
-  if (method === "POST" && path === "/api/debug/hydra-format-test") {
-    const body = requireHydraFormatTestBody(await readJson(request));
-    const result = await testHydraMetadataFormats(
-      body.userId,
-      body.project
-    );
-    sendJson(response, 200, result);
     return;
   }
 
@@ -164,16 +144,6 @@ function requireAssembleBody(value: unknown): AssembleBody {
     throw new Error("Invalid context assembly request.");
   }
   return body as unknown as AssembleBody;
-}
-
-function requireHydraFormatTestBody(value: unknown): HydraFormatTestBody {
-  const body = requireObject(value);
-  if (!isNonEmptyString(body.userId) || !isNonEmptyString(body.project)) {
-    throw new Error(
-      "HydraDB format test requires non-empty userId and project values."
-    );
-  }
-  return body as unknown as HydraFormatTestBody;
 }
 
 function requireObject(value: unknown): Record<string, unknown> {
