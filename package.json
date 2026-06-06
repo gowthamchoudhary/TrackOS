@@ -18,8 +18,8 @@
     "onCommand:traceos.resumeCapture",
     "onCommand:traceos.snapshotState",
     "onCommand:traceos.askWithContext",
-    "onCommand:traceos.testHydraConnection",
-    "onCommand:traceos.ingestSnapshotToHydra",
+    "onCommand:traceos.testBackendConnection",
+    "onCommand:traceos.ingestSnapshotToBackend",
     "onView:traceos.sidebar"
   ],
   "main": "./out/extension.js",
@@ -69,28 +69,28 @@
         "category": "TraceOS"
       },
       {
-        "command": "traceos.testHydraConnection",
-        "title": "Test HydraDB Connection",
+        "command": "traceos.testBackendConnection",
+        "title": "Test Backend Connection",
         "category": "TraceOS"
       },
       {
-        "command": "traceos.ingestSnapshotToHydra",
-        "title": "Ingest Snapshot To HydraDB",
+        "command": "traceos.ingestSnapshotToBackend",
+        "title": "Ingest Snapshot To Backend",
         "category": "TraceOS"
       }
     ],
     "configuration": {
       "title": "TraceOS",
       "properties": {
-        "traceos.hydraApiKey": {
+        "traceos.backendUrl": {
           "type": "string",
-          "default": "",
-          "description": "HydraDB API key for TraceOS memory storage"
+          "default": "http://localhost:8000",
+          "description": "Managed TraceOS backend URL"
         },
         "traceos.userId": {
           "type": "string",
           "default": "local_user",
-          "description": "User ID used for TraceOS HydraDB sub-tenant isolation"
+          "description": "User ID used for managed TraceOS memory isolation"
         },
         "traceos.customAgentCommand": {
           "type": "string",
@@ -113,14 +113,13 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "backend": "npm run compile && node out/backend/server.js"
   },
-  "devDependencies": {
+  "dependencies": {
+    "@hydradb/sdk": "^2.0.0",
     "@types/node": "^20.17.0",
     "@types/vscode": "^1.85.0",
     "typescript": "^5.7.2"
-  },
-  "dependencies": {
-    "@hydradb/sdk": "^2.0.0"
   }
 }
