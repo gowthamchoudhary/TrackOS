@@ -1,11 +1,5 @@
-import {
-  MemoryRecallResult,
-  TraceMemory
-} from "../types/memory";
-import {
-  DiagnosticEvidence,
-  Snapshot
-} from "../types/snapshot";
+import { MemoryRecallResult, TraceMemory } from "../types/memory";
+import { DiagnosticEvidence, Snapshot } from "../types/snapshot";
 
 const MAX_DIFF_CHARACTERS = 20_000;
 
@@ -34,7 +28,7 @@ export function assembleContext(
       "Repeated Diagnostics From Session",
       formatRepeatedDiagnostics(current.diagnostics, previousSnapshots)
     ),
-    section("Previous HydraDB Memories", formatMemories(recall)),
+    section("Previous TraceOS Memories", formatMemories(recall)),
     section(
       "Agent Instructions",
       [
@@ -162,15 +156,14 @@ function diagnosticKey(diagnostic: DiagnosticEvidence): string {
 
 function formatMemories(recall: MemoryRecallResult): string {
   if (!recall.hydraAvailable) {
-    const notConfiguredMessage =
-      "HydraDB is not configured, so persistent cross-session memory is disabled.";
-    return recall.message === notConfiguredMessage
-      ? notConfiguredMessage
-      : `HydraDB is currently unavailable. Using current local evidence only.${recall.message ? ` ${recall.message}` : ""}`;
+    return (
+      recall.message ??
+      "TraceOS backend unavailable. Running local context only."
+    );
   }
 
   if (recall.memories.length === 0) {
-    return "HydraDB is configured, but no relevant memories were retrieved.";
+    return "No relevant managed memories were retrieved.";
   }
 
   return recall.memories.map(formatMemory).join("\n\n");
@@ -181,7 +174,7 @@ function formatMemory(memory: TraceMemory): string {
     `### ${memory.label}`,
     "",
     `* Event type: ${memory.eventType}`,
-    `* Timestamp: ${memory.timestamp || "Not provided by HydraDB."}`,
+    `* Timestamp: ${memory.timestamp || "Not provided."}`,
     memory.filePath ? `* File: ${memory.filePath}` : undefined,
     "",
     memory.rawEvidence

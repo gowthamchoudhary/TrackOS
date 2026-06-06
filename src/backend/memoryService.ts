@@ -83,6 +83,22 @@ export function snapshotToMemories(
   );
   const memories: TraceMemory[] = [...diagnosticMemories];
 
+  if (snapshot.git.status) {
+    memories.push({
+      id: `${snapshot.id}:git_status`,
+      label: `Git status at ${snapshot.timestamp}`,
+      eventType: "git_status",
+      project,
+      userId,
+      rawEvidence: snapshot.git.status,
+      summary: `${snapshot.git.changedFiles.length} changed file${plural(snapshot.git.changedFiles.length)} reported by git status.`,
+      tags: ["git", "status"],
+      importance: "medium",
+      infer: false,
+      timestamp: snapshot.timestamp
+    });
+  }
+
   if (snapshot.git.diff) {
     memories.push({
       id: `${snapshot.id}:git_diff`,

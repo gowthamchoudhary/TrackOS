@@ -136,6 +136,7 @@ function readEventType(
     "failure",
     "fix",
     "diagnostic",
+    "git_status",
     "git_diff",
     "terminal_log",
     "constraint",

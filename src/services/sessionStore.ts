@@ -5,6 +5,8 @@ import { WorkspaceInfo } from "../utils/workspace";
 const MAX_SNAPSHOTS = 50;
 
 export class SessionStore {
+  private appendQueue: Promise<void> = Promise.resolve();
+
   public constructor(private readonly workspace: WorkspaceInfo) {}
 
   public async initialize(): Promise<void> {
@@ -38,11 +40,18 @@ export class SessionStore {
   }
 
   public async append(snapshot: Snapshot): Promise<SessionData> {
-    const session = await this.read();
-    session.workspace = this.workspace.name;
-    session.snapshots = [...session.snapshots, snapshot].slice(-MAX_SNAPSHOTS);
-    await writeJsonAtomically(this.workspace.sessionFile, session);
-    return session;
+    const operation = this.appendQueue.then(async () => {
+      const session = await this.read();
+      session.workspace = this.workspace.name;
+      session.snapshots = [...session.snapshots, snapshot].slice(-MAX_SNAPSHOTS);
+      await writeJsonAtomically(this.workspace.sessionFile, session);
+      return session;
+    });
+    this.appendQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
   }
 }
 

@@ -2,14 +2,17 @@ import { promises as fs } from "node:fs";
 import * as vscode from "vscode";
 import { AgentId, launchAgent } from "./services/agentRouter";
 import { CaptureService } from "./services/captureService";
-import { assembleContext } from "./services/contextAssembler";
 import {
+  assembleManagedContext,
   ingestMemory,
-  recallRelevantContext,
-  testHydraConnection
+  testBackend
 } from "./services/memoryService";
 import { SessionStore } from "./services/sessionStore";
-import { WorkspaceInfo, getCurrentWorkspace } from "./utils/workspace";
+import {
+  WorkspaceInfo,
+  getCurrentWorkspace,
+  getFileSystemWorkspaces
+} from "./utils/workspace";
 import { TraceosViewProvider } from "./views/traceosViewProvider";
 
 const captureServices = new Map<string, CaptureService>();
@@ -54,21 +57,18 @@ export async function activate(
     vscode.commands.registerCommand("traceos.snapshotState", () =>
       runCommand(snapshotState)
     ),
-    vscode.commands.registerCommand("traceos.askWithContext", () =>
-      runCommand(askWithContext)
+    vscode.commands.registerCommand("traceos.testBackendConnection", () =>
+      runCommand(testBackendConnection)
     ),
-    vscode.commands.registerCommand("traceos.testHydraConnection", () =>
-      runCommand(testHydraDbConnection)
+    vscode.commands.registerCommand("traceos.ingestSnapshotToBackend", () =>
+      runCommand(ingestSnapshotToBackend)
     ),
-    vscode.commands.registerCommand("traceos.ingestSnapshotToHydra", () =>
-      runCommand(ingestSnapshotToHydra)
-    ),
-    vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("traceos.autoStartCapture")) {
-        void runCommand(handleAutoStartConfigurationChange);
+    vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+      for (const removed of event.removed) {
+        const service = captureServices.get(removed.uri.fsPath);
+        service?.dispose();
+        captureServices.delete(removed.uri.fsPath);
       }
-    }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => {
       void runCommand(autoStartCapture);
     }),
     captureStatusItem,
@@ -83,8 +83,8 @@ export async function activate(
   );
 
   updateCaptureStatus();
-  await showPrivacyNoticeOnce();
   await autoStartCapture();
+  await showPrivacyNoticeOnce();
 }
 
 export function deactivate(): void {
@@ -99,20 +99,13 @@ async function startCapture(): Promise<void> {
 }
 
 async function resumeCapture(): Promise<void> {
-  const workspace = requireWorkspace();
-  if (!workspace) {
+  if (getFileSystemWorkspaces().length === 0) {
+    requireWorkspace();
     return;
   }
 
   await extensionContext.globalState.update(CAPTURE_PAUSED_KEY, false);
-  const service = getCaptureService(workspace);
-  const wasStarted = service.isStarted;
-  await service.start();
-  updateCaptureStatus();
-  if (!wasStarted) {
-    vscode.window.setStatusBarMessage("TraceOS capture started", 5000);
-    void vscode.window.showInformationMessage("TraceOS capture started");
-  }
+  await autoStartCapture();
 }
 
 async function pauseCapture(): Promise<void> {
@@ -121,7 +114,6 @@ async function pauseCapture(): Promise<void> {
     service.pause();
   }
   updateCaptureStatus();
-  void vscode.window.showInformationMessage("TraceOS capture paused");
 }
 
 async function captureStatusAction(): Promise<void> {
@@ -155,45 +147,6 @@ async function snapshotState(): Promise<void> {
   );
 }
 
-async function askWithContext(): Promise<void> {
-  const workspace = requireWorkspace();
-  if (!workspace) {
-    return;
-  }
-
-  const request = await vscode.window.showInputBox({
-    title: "TraceOS: Ask With Context",
-    prompt: "What should the coding agent help with?",
-    ignoreFocusOut: true
-  });
-
-  if (request === undefined) {
-    return;
-  }
-
-  if (!request.trim()) {
-    void vscode.window.showWarningMessage(
-      "TraceOS needs a request to build agent context."
-    );
-    return;
-  }
-
-  await generateContext(request.trim(), workspace);
-
-  const document = await vscode.workspace.openTextDocument(
-    vscode.Uri.file(workspace.contextFile)
-  );
-  await vscode.window.showTextDocument(document);
-
-  const prompt =
-    "Use .traceos/TRACEOS_CONTEXT.md as exact project context before answering. " +
-    `User request: ${request.trim()}`;
-  await vscode.env.clipboard.writeText(prompt);
-  void vscode.window.showInformationMessage(
-    "TraceOS context generated and agent prompt copied to clipboard."
-  );
-}
-
 async function runWithTraceosMemory(
   request: string,
   agentId: AgentId
@@ -205,39 +158,39 @@ async function runWithTraceosMemory(
 
   await generateContext(request, workspace);
   const launch = await launchAgent(agentId, request, workspace);
-  const promptStatus = launch.autoSubmitted
-    ? "The final prompt was submitted."
-    : "The final prompt is inserted but not submitted.";
-  return `Sent "${launch.command}" to a new TraceOS Agent terminal. ${promptStatus}`;
+  return `Started "${launch.command}" with TraceOS memory.`;
 }
 
 async function generateContext(
   request: string,
   workspace: WorkspaceInfo
 ): Promise<void> {
-  const store = new SessionStore(workspace);
-  const previousSession = await store.read();
-  const snapshot = await getCaptureService(workspace).captureSnapshot();
+  const { snapshot, ingestion } = await getCaptureService(
+    workspace
+  ).captureAndSave({ forceIngestion: true });
+  if (!ingestion.backendAvailable) {
+    throw new Error(
+      "Managed TraceOS backend ingestion failed. The agent was not started."
+    );
+  }
 
-  await store.append(snapshot);
-  await ingestMemory(snapshot, previousSession.snapshots);
-  const recall = await recallRelevantContext(request, snapshot);
-  const markdown = assembleContext(
-    request,
-    snapshot,
-    previousSession.snapshots,
-    recall
-  );
+  const markdown = await assembleManagedContext(request, snapshot, workspace);
+  if (!markdown) {
+    throw new Error(
+      "Managed TraceOS memory recall failed. The agent was not started."
+    );
+  }
+
   await fs.writeFile(workspace.contextFile, markdown, "utf8");
 }
 
-async function testHydraDbConnection(): Promise<void> {
+async function testBackendConnection(): Promise<void> {
   const workspace = requireWorkspace();
   if (!workspace) {
     return;
   }
 
-  const result = await testHydraConnection(workspace.name);
+  const result = await testBackend(workspace);
   if (result.success) {
     void vscode.window.showInformationMessage(result.message);
   } else {
@@ -245,7 +198,7 @@ async function testHydraDbConnection(): Promise<void> {
   }
 }
 
-async function ingestSnapshotToHydra(): Promise<void> {
+async function ingestSnapshotToBackend(): Promise<void> {
   const workspace = requireWorkspace();
   if (!workspace) {
     return;
@@ -261,15 +214,14 @@ async function ingestSnapshotToHydra(): Promise<void> {
     return;
   }
 
-  const previousSnapshots = session.snapshots.slice(0, -1);
-  const result = await ingestMemory(snapshot, previousSnapshots);
-  if (!result.hydraAvailable || result.ingested === 0) {
+  const result = await ingestMemory(snapshot, workspace);
+  if (!result.backendAvailable || result.ingested === 0) {
     void vscode.window.showWarningMessage(result.message);
     return;
   }
 
   void vscode.window.showInformationMessage(
-    `TraceOS sent ${result.ingested} memory item${plural(result.ingested)} from the latest snapshot to HydraDB.`
+    `TraceOS sent ${result.ingested} memory item${plural(result.ingested)} from the latest snapshot to the managed backend.`
   );
 }
 
@@ -285,51 +237,29 @@ function getCaptureService(workspace: WorkspaceInfo): CaptureService {
 }
 
 async function autoStartCapture(): Promise<void> {
-  const workspace = getCurrentWorkspace();
-  if (!workspace) {
+  const workspaces = getFileSystemWorkspaces();
+  if (workspaces.length === 0) {
     updateCaptureStatus();
     return;
   }
-
-  const configuration = vscode.workspace.getConfiguration(
-    "traceos",
-    workspace.folder.uri
-  );
-  const autoStart = configuration.get<boolean>("autoStartCapture", true);
   const paused = extensionContext.globalState.get<boolean>(
     CAPTURE_PAUSED_KEY,
     false
   );
 
-  if (!autoStart || paused) {
+  if (paused) {
     updateCaptureStatus();
     return;
   }
 
-  const service = getCaptureService(workspace);
-  if (!service.isStarted) {
-    await service.start();
-  }
-  updateCaptureStatus();
-}
-
-async function handleAutoStartConfigurationChange(): Promise<void> {
-  const workspace = getCurrentWorkspace();
-  if (!workspace) {
-    updateCaptureStatus();
-    return;
-  }
-
-  const autoStart = vscode.workspace
-    .getConfiguration("traceos", workspace.folder.uri)
-    .get<boolean>("autoStartCapture", true);
-
-  if (autoStart) {
-    await autoStartCapture();
-    return;
-  }
-
-  captureServices.get(workspace.rootPath)?.pause();
+  await Promise.all(
+    workspaces.map(async (workspace) => {
+      const service = getCaptureService(workspace);
+      if (!service.isStarted) {
+        await service.start();
+      }
+    })
+  );
   updateCaptureStatus();
 }
 
@@ -340,19 +270,16 @@ async function showPrivacyNoticeOnce(): Promise<void> {
 
   await extensionContext.globalState.update(PRIVACY_NOTICE_KEY, true);
   const selection = await vscode.window.showInformationMessage(
-    "TraceOS captures diagnostics, git diffs, and .traceos/terminal.log to build agent memory. You can pause capture anytime.",
-    "Continue",
-    "Open Settings",
+    "TraceOS runs automatically to capture diagnostics, git changes, and terminal log evidence for agent memory. You can pause it anytime.",
     "Pause Capture"
   );
 
-  if (selection === "Open Settings") {
-    await vscode.commands.executeCommand(
-      "workbench.action.openSettings",
-      "traceos"
-    );
-  } else if (selection === "Pause Capture") {
+  if (selection === "Pause Capture") {
     await extensionContext.globalState.update(CAPTURE_PAUSED_KEY, true);
+    for (const service of captureServices.values()) {
+      service.pause();
+    }
+    updateCaptureStatus();
   }
 }
 
@@ -367,8 +294,8 @@ function updateCaptureStatus(): void {
     captureServices.get(workspace.rootPath)?.isStarted === true;
 
   captureStatusItem.text = active
-    ? "$(record) TraceOS: Capturing"
-    : "$(debug-pause) TraceOS: Paused";
+    ? "TraceOS: Capturing"
+    : "TraceOS: Paused";
   captureStatusItem.tooltip = active
     ? "TraceOS capture is active. Click to open the TraceOS sidebar."
     : "TraceOS capture is paused. Click to resume.";

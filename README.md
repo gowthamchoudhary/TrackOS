@@ -4,6 +4,12 @@ TraceOS is an engineering memory layer for coding agents. The VS Code
 extension captures exact diagnostics, git diffs, terminal evidence, and
 workspace context locally, then sends snapshots to a managed backend.
 
+TraceOS activates and starts capture when VS Code opens. The normal workflow
+is entirely in the TraceOS sidebar: enter a request, select a coding agent,
+and choose **Run With TraceOS Memory**. TraceOS refreshes evidence, performs
+managed ingestion and recall, writes `.traceos/TRACEOS_CONTEXT.md`, and starts
+the selected agent with that context automatically.
+
 ## Architecture
 
 ```text
@@ -49,15 +55,10 @@ same diagnostic in more than one distinct snapshot.
 
 ## Extension Settings
 
-- `traceos.backendUrl` defaults to `http://localhost:8000`
+- `traceos.backendUrl` defaults to `https://trackos-h16r.onrender.com`
 - `traceos.userId` defaults to `local_user`
-- `traceos.autoStartCapture`
 - `traceos.customAgentCommand`
-- `traceos.autoSubmitPrompt`
 
-When the backend cannot be reached, TraceOS continues with current and locally
-saved evidence, writes `.traceos/TRACEOS_CONTEXT.md`, and reports:
-
-```text
-TraceOS backend unavailable. Running local context only.
-```
+The extension contains no HydraDB credentials. If managed ingestion or recall
+fails, TraceOS reports the error and does not start the selected agent with
+incomplete memory.

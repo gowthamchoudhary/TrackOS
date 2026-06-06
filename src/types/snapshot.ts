@@ -20,6 +20,7 @@ export type CaptureEventType =
   | "diagnosticsChanged"
   | "documentSaved"
   | "activeEditorChanged"
+  | "workspaceChanged"
   | "terminalLogChanged";
 
 export interface CaptureEvent {

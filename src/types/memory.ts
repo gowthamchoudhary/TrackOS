@@ -2,6 +2,7 @@ export type TraceMemoryEventType =
   | "failure"
   | "fix"
   | "diagnostic"
+  | "git_status"
   | "git_diff"
   | "terminal_log"
   | "constraint"
@@ -32,11 +33,12 @@ export interface MemoryRecallResult {
 export interface MemoryIngestionResult {
   attempted: number;
   ingested: number;
-  hydraAvailable: boolean;
+  backendAvailable: boolean;
   message: string;
 }
 
-export interface HydraConnectionTestResult {
+export interface BackendHealthResult {
   success: boolean;
+  hydraConfigured: boolean;
   message: string;
 }

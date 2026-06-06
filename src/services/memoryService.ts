@@ -1,321 +1,170 @@
+import * as vscode from "vscode";
 import {
-  HydraConnectionTestResult,
-  MemoryIngestionResult,
-  MemoryRecallResult,
-  TraceMemory
+  BackendHealthResult,
+  MemoryIngestionResult
 } from "../types/memory";
-import { DiagnosticEvidence, Snapshot } from "../types/snapshot";
-import {
-  buildHydraMemoryPayload,
-  getHydraConnection,
-  parseHydraMemories
-} from "./hydraClient";
+import { Snapshot } from "../types/snapshot";
+import { WorkspaceInfo } from "../utils/workspace";
+
+const BACKEND_UNAVAILABLE =
+  "TraceOS backend unavailable. Running local context only.";
+const REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_BACKEND_URL = "https://trackos-h16r.onrender.com";
+
+interface IngestResponse {
+  ok: boolean;
+  attempted: number;
+  ingested: number;
+  message: string;
+}
+
+interface AssembleResponse {
+  ok: boolean;
+  markdown: string;
+}
+
+interface HealthResponse {
+  ok: boolean;
+  hydraConfigured: boolean;
+}
 
 export async function ingestMemory(
   snapshot: Snapshot,
-  previousSnapshots: Snapshot[] = []
+  workspace: WorkspaceInfo
 ): Promise<MemoryIngestionResult> {
-  const connection = getHydraConnection(snapshot.workspaceName);
-  const memories = snapshotToMemories(
-    snapshot,
-    connection.userId,
-    previousSnapshots
-  );
+  try {
+    const response = await postJson<IngestResponse>(
+      workspace,
+      "/api/memory/ingest",
+      {
+        userId: getUserId(workspace),
+        project: workspace.name,
+        workspaceName: snapshot.workspaceName,
+        snapshot
+      }
+    );
 
-  if (!connection.available || !connection.client) {
-    const message =
-      "HydraDB is not configured, so persistent cross-session memory is disabled.";
-    console.log(`[TraceOS] ${message}`);
     return {
-      attempted: memories.length,
-      ingested: 0,
-      hydraAvailable: false,
-      message
+      attempted: response.attempted,
+      ingested: response.ingested,
+      backendAvailable: true,
+      message: response.message
     };
-  }
-
-  if (memories.length === 0) {
+  } catch (error) {
+    console.error(`[TraceOS] Backend ingestion failed: ${errorMessage(error)}`);
     return {
       attempted: 0,
       ingested: 0,
-      hydraAvailable: true,
-      message: "No diagnostic, git diff, terminal log, or repeated diagnostic evidence was available to ingest."
-    };
-  }
-
-  try {
-    await connection.client.context.ingest({
-      type: "memory",
-      tenantId: connection.tenantId,
-      subTenantId: connection.subTenantId,
-      upsert: true,
-      memories: buildHydraMemoryPayload(memories)
-    });
-
-    const message = `Queued ${memories.length} real memory item${plural(memories.length)} for HydraDB ingestion.`;
-    console.log(`[TraceOS] ${message}`);
-    return {
-      attempted: memories.length,
-      ingested: memories.length,
-      hydraAvailable: true,
-      message
-    };
-  } catch (error) {
-    const message = `HydraDB ingestion failed; snapshot remains saved locally: ${errorMessage(error)}`;
-    console.error(`[TraceOS] ${message}`);
-    return {
-      attempted: memories.length,
-      ingested: 0,
-      hydraAvailable: true,
-      message
+      backendAvailable: false,
+      message: BACKEND_UNAVAILABLE
     };
   }
 }
 
-export async function recallRelevantContext(
+export async function assembleManagedContext(
   request: string,
-  snapshot: Snapshot
-): Promise<MemoryRecallResult> {
-  const connection = getHydraConnection(snapshot.workspaceName);
-  if (!connection.available || !connection.client) {
-    const message =
-      "HydraDB is not configured, so persistent cross-session memory is disabled.";
-    console.log(`[TraceOS] ${message}`);
-    return {
-      memories: [],
-      hydraAvailable: false,
-      message
-    };
-  }
-
+  snapshot: Snapshot,
+  workspace: WorkspaceInfo
+): Promise<string | undefined> {
   try {
-    const response = await connection.client.query({
-      tenantId: connection.tenantId,
-      subTenantId: connection.subTenantId,
-      query: buildEnrichedQuery(request, snapshot),
-      type: "memory",
-      queryBy: "hybrid",
-      mode: "thinking",
-      maxResults: 10,
-      graphContext: true,
-      recencyBias: 0.3
-    });
-
-    return {
-      memories: parseHydraMemories(
-        response,
-        snapshot.workspaceName,
-        connection.userId
-      ),
-      hydraAvailable: true
-    };
-  } catch (error) {
-    const message = `HydraDB recall failed: ${errorMessage(error)}`;
-    console.error(`[TraceOS] ${message}`);
-    return {
-      memories: [],
-      hydraAvailable: false,
-      message
-    };
-  }
-}
-
-export async function testHydraConnection(
-  project: string
-): Promise<HydraConnectionTestResult> {
-  const connection = getHydraConnection(project);
-  if (!connection.available || !connection.client) {
-    return {
-      success: false,
-      message:
-        "HydraDB API key is missing. Configure traceos.hydraApiKey or HYDRA_DB_API_KEY."
-    };
-  }
-
-  try {
-    await connection.client.query({
-      tenantId: connection.tenantId,
-      subTenantId: connection.subTenantId,
-      query: "TraceOS connection verification",
-      type: "memory",
-      queryBy: "hybrid",
-      mode: "fast",
-      maxResults: 1,
-      graphContext: false,
-      recencyBias: 0
-    });
-    return {
-      success: true,
-      message: `HydraDB connection succeeded for ${connection.subTenantId}.`
-    };
-  } catch (error) {
-    return {
-      success: false,
-      message: `HydraDB connection failed: ${errorMessage(error)}`
-    };
-  }
-}
-
-export function snapshotToMemories(
-  snapshot: Snapshot,
-  userId: string,
-  previousSnapshots: Snapshot[] = []
-): TraceMemory[] {
-  const diagnosticMemories = snapshot.diagnostics.map((diagnostic, index) =>
-    diagnosticMemory(snapshot, diagnostic, userId, index)
-  );
-  const memories: TraceMemory[] = [...diagnosticMemories];
-
-  if (snapshot.git.diff) {
-    memories.push({
-      id: `${snapshot.id}:git_diff`,
-      label: `Git diff at ${snapshot.timestamp}`,
-      eventType: "git_diff",
-      project: snapshot.workspaceName,
-      userId,
-      rawEvidence: snapshot.git.diff,
-      summary: snapshot.git.diffStat || "Exact git diff captured.",
-      tags: ["git", "diff"],
-      importance: "medium",
-      infer: false,
-      timestamp: snapshot.timestamp
-    });
-  }
-
-  if (snapshot.terminalLog) {
-    memories.push({
-      id: `${snapshot.id}:terminal_log`,
-      label: `Terminal log at ${snapshot.timestamp}`,
-      eventType: "terminal_log",
-      project: snapshot.workspaceName,
-      userId,
-      rawEvidence: snapshot.terminalLog,
-      summary: "Recent exact terminal log evidence.",
-      tags: ["terminal"],
-      importance: "medium",
-      infer: false,
-      timestamp: snapshot.timestamp
-    });
-  }
-
-  memories.push(
-    ...repeatedDiagnosticMemories(
-      snapshot,
-      diagnosticMemories,
-      userId,
-      previousSnapshots
-    )
-  );
-  return memories;
-}
-
-function diagnosticMemory(
-  snapshot: Snapshot,
-  diagnostic: DiagnosticEvidence,
-  userId: string,
-  index: number
-): TraceMemory {
-  return {
-    id: `${snapshot.id}:diagnostic:${index}`,
-    label: `${diagnostic.severity} diagnostic in ${diagnostic.filePath}`,
-    eventType: "diagnostic",
-    project: snapshot.workspaceName,
-    userId,
-    rawEvidence: JSON.stringify(diagnostic, null, 2),
-    summary: diagnostic.message,
-    filePath: diagnostic.filePath,
-    tags: ["diagnostic", diagnostic.severity.toLowerCase()],
-    importance: diagnostic.severity === "Error" ? "high" : "medium",
-    infer: false,
-    timestamp: snapshot.timestamp
-  };
-}
-
-function repeatedDiagnosticMemories(
-  snapshot: Snapshot,
-  diagnosticMemories: TraceMemory[],
-  userId: string,
-  previousSnapshots: Snapshot[]
-): TraceMemory[] {
-  const previousCounts = new Map<string, number>();
-  for (const previous of previousSnapshots) {
-    for (const diagnostic of previous.diagnostics) {
-      const key = diagnosticKey(diagnostic);
-      previousCounts.set(key, (previousCounts.get(key) ?? 0) + 1);
-    }
-  }
-
-  return snapshot.diagnostics.flatMap((diagnostic, index) => {
-    const previousCount = previousCounts.get(diagnosticKey(diagnostic)) ?? 0;
-    if (previousCount === 0) {
-      return [];
-    }
-
-    const observedCount = previousCount + 1;
-    return [
+    const response = await postJson<AssembleResponse>(
+      workspace,
+      "/api/context/assemble",
       {
-        id: `${snapshot.id}:pattern:diagnostic:${index}`,
-        label: `Repeated diagnostic in ${diagnostic.filePath}`,
-        eventType: "pattern" as const,
-        project: snapshot.workspaceName,
-        userId,
-        rawEvidence: JSON.stringify(
-          {
-            diagnostic,
-            observedSnapshotCount: observedCount
-          },
-          null,
-          2
-        ),
-        summary: `The exact diagnostic "${diagnostic.message}" was observed in ${observedCount} local snapshots.`,
-        filePath: diagnostic.filePath,
-        tags: ["pattern", "repeated-diagnostic"],
-        importance:
-          diagnostic.severity === "Error"
-            ? ("high" as const)
-            : ("medium" as const),
-        relatedIds: [diagnosticMemories[index].id],
-        infer: true,
-        timestamp: snapshot.timestamp
+        userId: getUserId(workspace),
+        project: workspace.name,
+        request,
+        snapshot
       }
-    ];
+    );
+    return response.markdown;
+  } catch (error) {
+    console.error(`[TraceOS] Backend context failed: ${errorMessage(error)}`);
+    return undefined;
+  }
+}
+
+export async function testBackend(
+  workspace: WorkspaceInfo
+): Promise<BackendHealthResult> {
+  try {
+    const response = await requestJson<HealthResponse>(
+      workspace,
+      "/api/health",
+      { method: "GET" }
+    );
+    return {
+      success: response.ok,
+      hydraConfigured: response.hydraConfigured,
+      message: response.hydraConfigured
+        ? "TraceOS backend is healthy and managed memory is configured."
+        : "TraceOS backend is healthy, but managed memory is not configured."
+    };
+  } catch (error) {
+    return {
+      success: false,
+      hydraConfigured: false,
+      message: `${BACKEND_UNAVAILABLE} ${errorMessage(error)}`
+    };
+  }
+}
+
+export function backendUnavailableMessage(): string {
+  return BACKEND_UNAVAILABLE;
+}
+
+async function postJson<T>(
+  workspace: WorkspaceInfo,
+  path: string,
+  body: unknown
+): Promise<T> {
+  return requestJson<T>(workspace, path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
   });
 }
 
-function buildEnrichedQuery(request: string, snapshot: Snapshot): string {
-  const evidence = [
-    `User request: ${request}`,
-    `Project: ${snapshot.workspaceName}`,
-    snapshot.activeFile ? `Current file: ${snapshot.activeFile}` : undefined,
-    snapshot.diagnostics.length > 0
-      ? `Diagnostic messages: ${snapshot.diagnostics
-          .map((diagnostic) => diagnostic.message)
-          .join(" | ")}`
-      : undefined,
-    snapshot.git.changedFiles.length > 0
-      ? `Changed files: ${snapshot.git.changedFiles.join(", ")}`
-      : undefined
-  ];
+async function requestJson<T>(
+  workspace: WorkspaceInfo,
+  path: string,
+  init: RequestInit
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  return evidence.filter((item): item is string => Boolean(item)).join("\n");
+  try {
+    const response = await fetch(`${getBackendUrl(workspace)}${path}`, {
+      ...init,
+      signal: controller.signal
+    });
+    const payload = (await response.json()) as T & { message?: string };
+    if (!response.ok) {
+      throw new Error(payload.message || `HTTP ${response.status}`);
+    }
+    return payload;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-function diagnosticKey(diagnostic: DiagnosticEvidence): string {
-  return JSON.stringify([
-    diagnostic.filePath,
-    diagnostic.line,
-    diagnostic.character,
-    diagnostic.severity,
-    diagnostic.message,
-    diagnostic.source ?? "",
-    diagnostic.code ?? ""
-  ]);
+function getBackendUrl(workspace: WorkspaceInfo): string {
+  const configured = vscode.workspace
+    .getConfiguration("traceos", workspace.folder.uri)
+    .get<string>("backendUrl", DEFAULT_BACKEND_URL)
+    .trim();
+  return (configured || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
+}
+
+function getUserId(workspace: WorkspaceInfo): string {
+  return (
+    vscode.workspace
+      .getConfiguration("traceos", workspace.folder.uri)
+      .get<string>("userId", "local_user")
+      .trim() || "local_user"
+  );
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function plural(count: number): string {
-  return count === 1 ? "" : "s";
 }

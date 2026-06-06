@@ -12,14 +12,6 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "workspaceContains:**/*",
-    "onCommand:traceos.startCapture",
-    "onCommand:traceos.pauseCapture",
-    "onCommand:traceos.resumeCapture",
-    "onCommand:traceos.snapshotState",
-    "onCommand:traceos.askWithContext",
-    "onCommand:traceos.testBackendConnection",
-    "onCommand:traceos.ingestSnapshotToBackend",
     "onView:traceos.sidebar"
   ],
   "main": "./out/extension.js",
@@ -44,38 +36,18 @@
     },
     "commands": [
       {
-        "command": "traceos.startCapture",
-        "title": "Start Capture",
-        "category": "TraceOS"
-      },
-      {
-        "command": "traceos.pauseCapture",
-        "title": "Pause Capture",
-        "category": "TraceOS"
-      },
-      {
-        "command": "traceos.resumeCapture",
-        "title": "Resume Capture",
-        "category": "TraceOS"
-      },
-      {
         "command": "traceos.snapshotState",
-        "title": "Snapshot State",
-        "category": "TraceOS"
-      },
-      {
-        "command": "traceos.askWithContext",
-        "title": "Ask With Context",
+        "title": "Debug: Snapshot State",
         "category": "TraceOS"
       },
       {
         "command": "traceos.testBackendConnection",
-        "title": "Test Backend Connection",
+        "title": "Debug: Test Backend Connection",
         "category": "TraceOS"
       },
       {
         "command": "traceos.ingestSnapshotToBackend",
-        "title": "Ingest Snapshot To Backend",
+        "title": "Debug: Ingest Snapshot To Backend",
         "category": "TraceOS"
       }
     ],
@@ -84,7 +56,7 @@
       "properties": {
         "traceos.backendUrl": {
           "type": "string",
-          "default": "http://localhost:8000",
+          "default": "https://trackos-h16r.onrender.com",
           "description": "Managed TraceOS backend URL"
         },
         "traceos.userId": {
@@ -96,16 +68,6 @@
           "type": "string",
           "default": "",
           "description": "Terminal command used when Custom command is selected in the TraceOS sidebar"
-        },
-        "traceos.autoSubmitPrompt": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically submit the final TraceOS prompt after inserting it into the agent terminal"
-        },
-        "traceos.autoStartCapture": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically start TraceOS capture when a workspace opens."
         }
       }
     }

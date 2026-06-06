@@ -17,10 +17,16 @@ export function getCurrentWorkspace(): WorkspaceInfo | undefined {
     (activeUri ? vscode.workspace.getWorkspaceFolder(activeUri) : undefined) ??
     vscode.workspace.workspaceFolders?.[0];
 
-  if (!folder || folder.uri.scheme !== "file") {
-    return undefined;
-  }
+  return folder?.uri.scheme === "file" ? workspaceInfo(folder) : undefined;
+}
 
+export function getFileSystemWorkspaces(): WorkspaceInfo[] {
+  return (vscode.workspace.workspaceFolders ?? [])
+    .filter((folder) => folder.uri.scheme === "file")
+    .map(workspaceInfo);
+}
+
+function workspaceInfo(folder: vscode.WorkspaceFolder): WorkspaceInfo {
   const rootPath = folder.uri.fsPath;
   const traceDirectory = path.join(rootPath, ".traceos");
 

@@ -11,7 +11,6 @@ const AGENT_COMMANDS: Record<Exclude<AgentId, "custom">, string> = {
 
 export interface AgentLaunchResult {
   command: string;
-  autoSubmitted: boolean;
 }
 
 export async function launchAgent(
@@ -24,7 +23,6 @@ export async function launchAgent(
     workspace.folder.uri
   );
   const command = resolveAgentCommand(agentId, configuration);
-  const autoSubmit = configuration.get<boolean>("autoSubmitPrompt", false);
   const terminal = vscode.window.createTerminal({
     name: "TraceOS Agent",
     cwd: workspace.rootPath
@@ -33,12 +31,9 @@ export async function launchAgent(
   terminal.show(true);
   terminal.sendText(command, true);
   await delay(750);
-  terminal.sendText(buildAgentPrompt(request), autoSubmit);
+  terminal.sendText(buildAgentPrompt(request), true);
 
-  return {
-    command,
-    autoSubmitted: autoSubmit
-  };
+  return { command };
 }
 
 export function buildAgentPrompt(request: string): string {
