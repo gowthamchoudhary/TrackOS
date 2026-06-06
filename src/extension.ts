@@ -20,7 +20,7 @@ import {
   getFileSystemWorkspaces
 } from "./utils/workspace";
 import {
-  TraceosRunStatus,
+  TraceosStatusUpdate,
   TraceosViewProvider
 } from "./views/traceosViewProvider";
 
@@ -122,10 +122,7 @@ async function snapshotState(): Promise<void> {
 async function runWithTraceosMemory(
   request: string,
   agentId: AgentId,
-  reportStatus: (
-    status: TraceosRunStatus,
-    state?: "running" | "success" | "error"
-  ) => Promise<void>
+  reportStatus: (update: TraceosStatusUpdate) => Promise<void>
 ): Promise<string> {
   const workspace = requireWorkspace();
   if (!workspace) {
@@ -135,25 +132,48 @@ async function runWithTraceosMemory(
   await generateContext(request, workspace, reportStatus);
   const prompt = buildAgentPrompt(request);
   await fs.writeFile(workspace.agentPromptFile, prompt, "utf8");
-  await reportStatus("Context generated");
+  await reportStatus({
+    phase: "context",
+    latestEvent: "Context generated and prompt prepared."
+  });
 
-  await reportStatus("Starting TraceOS Agent");
+  await reportStatus({
+    phase: "launching",
+    selectedAgent: agentId,
+    latestEvent: "Launching the selected agent with TraceOS memory."
+  });
   const run = await agentRunner.run(agentId, workspace);
   if (!run.launched) {
     await handleMissingAgent(run.command, prompt, workspace);
-    await reportStatus("CLI missing, prompt copied");
+    await reportStatus({
+      phase: "ready",
+      latestEvent: "CLI missing. Prompt file opened and copied.",
+      latestError: `Selected agent CLI '${run.command}' was not found.`
+    });
     return "CLI missing, prompt copied";
   }
 
-  await reportStatus("Agent completed; storing captured output");
+  await reportStatus({
+    phase: "syncing",
+    latestEvent: "Agent completed. Storing captured output."
+  });
   const ingestion = await ingestAgentEvidence(run.evidence, workspace);
   if (!ingestion.backendAvailable) {
-    await reportStatus(`Backend error: ${ingestion.message}`, "error");
+    await reportStatus({
+      phase: "error",
+      backendConnected: false,
+      latestEvent: "Agent output remains available locally.",
+      latestError: ingestion.message
+    });
   } else {
-    await reportStatus(
-      `Agent memories stored: ${ingestion.ingested}`,
-      "success"
-    );
+    await reportStatus({
+      phase: "ready",
+      backendConnected: true,
+      memoriesStored: ingestion.ingested,
+      lastSync: new Date().toISOString(),
+      latestEvent: `Captured agent output stored as ${ingestion.ingested} memory item${plural(ingestion.ingested)}.`,
+      latestError: undefined
+    });
   }
 
   if (run.evidence.exitCode !== 0) {
@@ -188,38 +208,58 @@ async function handleMissingAgent(
 async function generateContext(
   request: string,
   workspace: WorkspaceInfo,
-  reportStatus: (
-    status: TraceosRunStatus,
-    state?: "running" | "success" | "error"
-  ) => Promise<void>
+  reportStatus: (update: TraceosStatusUpdate) => Promise<void>
 ): Promise<void> {
-  await reportStatus("Capturing");
+  await reportStatus({
+    phase: "capturing",
+    latestEvent: "Capturing current workspace evidence.",
+    latestError: undefined
+  });
   const { snapshot, ingestion } = await getCaptureService(
     workspace
   ).captureAndSave({
     forceIngestion: true,
     notify: false,
-    onBeforeIngest: () => reportStatus("Ingesting memory")
+    onBeforeIngest: () =>
+      reportStatus({
+        phase: "syncing",
+        latestEvent: "Syncing current evidence to managed memory."
+      })
   });
   if (ingestion.backendAvailable) {
-    await reportStatus(
-      `Memories stored: ${ingestion.ingested}`,
-      "success"
-    );
+    await reportStatus({
+      phase: "context",
+      backendConnected: true,
+      memoriesStored: ingestion.ingested,
+      lastSync: new Date().toISOString(),
+      latestEvent: `${ingestion.ingested} memory item${plural(ingestion.ingested)} stored. Building agent context.`,
+      latestError: undefined
+    });
   } else {
-    await reportStatus(`Backend error: ${ingestion.message}`, "error");
+    await reportStatus({
+      phase: "context",
+      backendConnected: false,
+      latestEvent: "Building context from local evidence.",
+      latestError: ingestion.message
+    });
   }
 
+  await reportStatus({
+    phase: "context",
+    latestEvent: "Building TRACEOS_CONTEXT.md from current evidence."
+  });
   const managedMarkdown = await assembleManagedContext(
     request,
     snapshot,
     workspace
   );
   if (!managedMarkdown) {
-    await reportStatus(
-      "Backend error: context assembly failed; using local context",
-      "error"
-    );
+    await reportStatus({
+      phase: "context",
+      backendConnected: false,
+      latestEvent: "Managed context unavailable. Using local evidence.",
+      latestError: "Context assembly failed; using local context."
+    });
   }
   const markdown =
     managedMarkdown ??
@@ -302,16 +342,22 @@ function getCaptureService(workspace: WorkspaceInfo): CaptureService {
         return;
       }
       if (!ingestion.backendAvailable) {
-        await sidebarProvider.reportStatus(
-          `Backend error: ${ingestion.message}`,
-          "error"
-        );
+        await sidebarProvider.reportStatus({
+          phase: "error",
+          backendConnected: false,
+          latestEvent: "Workspace evidence remains available locally.",
+          latestError: ingestion.message
+        });
         return;
       }
-      await sidebarProvider.reportStatus(
-        `Memories stored: ${ingestion.ingested}`,
-        "success"
-      );
+      await sidebarProvider.reportStatus({
+        phase: "ready",
+        backendConnected: true,
+        memoriesStored: ingestion.ingested,
+        lastSync: new Date().toISOString(),
+        latestEvent: `${ingestion.ingested} memory item${plural(ingestion.ingested)} stored from workspace evidence.`,
+        latestError: undefined
+      });
     }
   );
   captureServices.set(workspace.rootPath, service);
@@ -324,7 +370,10 @@ async function autoStartCapture(): Promise<void> {
     updateCaptureStatus();
     return;
   }
-  await sidebarProvider?.reportStatus("Capturing");
+  await sidebarProvider?.reportStatus({
+    phase: "capturing",
+    latestEvent: "TraceOS is recording workspace evidence automatically."
+  });
   await Promise.all(
     workspaces.map(async (workspace) => {
       const service = getCaptureService(workspace);
@@ -333,6 +382,10 @@ async function autoStartCapture(): Promise<void> {
       }
     })
   );
+  await sidebarProvider?.reportStatus({
+    phase: "ready",
+    latestEvent: "TraceOS is recording workspace evidence automatically."
+  });
   updateCaptureStatus();
 }
 
