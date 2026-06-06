@@ -3,7 +3,7 @@
   "displayName": "TraceOS",
   "description": "An engineering memory layer that captures exact workspace evidence for coding agents.",
   "version": "0.1.0",
-  "publisher": "traceos",
+  "publisher": "gowthamchoudhary",
   "repository": {
     "type": "git",
     "url": "https://github.com/gowthamchoudhary/TrackOS.git"
