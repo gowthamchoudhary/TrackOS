@@ -4,6 +4,10 @@
   "description": "An engineering memory layer that captures exact workspace evidence for coding agents.",
   "version": "0.1.0",
   "publisher": "traceos",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gowthamchoudhary/TrackOS.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -74,7 +78,8 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "compile": "npm run clean && tsc -p ./",
+    "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
     "watch": "tsc -watch -p ./",
     "backend": "npm run compile && node out/backend/server.js"
   },

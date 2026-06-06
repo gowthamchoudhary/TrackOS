@@ -1,0 +1,13 @@
+.vscode/**
+.vscode-test/**
+src/**
+.traceos/**
+out/backend/**
+*.vsix
+.env
+.env.*
+.git/**
+.gitignore
+tsconfig.json
+package-lock.json
+node_modules/**
