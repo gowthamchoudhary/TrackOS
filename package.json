@@ -1,0 +1,126 @@
+{
+  "name": "traceos",
+  "displayName": "TraceOS",
+  "description": "An engineering memory layer that captures exact workspace evidence for coding agents.",
+  "version": "0.1.0",
+  "publisher": "traceos",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "workspaceContains:**/*",
+    "onCommand:traceos.startCapture",
+    "onCommand:traceos.pauseCapture",
+    "onCommand:traceos.resumeCapture",
+    "onCommand:traceos.snapshotState",
+    "onCommand:traceos.askWithContext",
+    "onCommand:traceos.testHydraConnection",
+    "onCommand:traceos.ingestSnapshotToHydra",
+    "onView:traceos.sidebar"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "traceos",
+          "title": "TraceOS",
+          "icon": "resources/traceos.svg"
+        }
+      ]
+    },
+    "views": {
+      "traceos": [
+        {
+          "id": "traceos.sidebar",
+          "name": "TraceOS Memory",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "traceos.startCapture",
+        "title": "Start Capture",
+        "category": "TraceOS"
+      },
+      {
+        "command": "traceos.pauseCapture",
+        "title": "Pause Capture",
+        "category": "TraceOS"
+      },
+      {
+        "command": "traceos.resumeCapture",
+        "title": "Resume Capture",
+        "category": "TraceOS"
+      },
+      {
+        "command": "traceos.snapshotState",
+        "title": "Snapshot State",
+        "category": "TraceOS"
+      },
+      {
+        "command": "traceos.askWithContext",
+        "title": "Ask With Context",
+        "category": "TraceOS"
+      },
+      {
+        "command": "traceos.testHydraConnection",
+        "title": "Test HydraDB Connection",
+        "category": "TraceOS"
+      },
+      {
+        "command": "traceos.ingestSnapshotToHydra",
+        "title": "Ingest Snapshot To HydraDB",
+        "category": "TraceOS"
+      }
+    ],
+    "configuration": {
+      "title": "TraceOS",
+      "properties": {
+        "traceos.hydraApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "HydraDB API key for TraceOS memory storage"
+        },
+        "traceos.userId": {
+          "type": "string",
+          "default": "local_user",
+          "description": "User ID used for TraceOS HydraDB sub-tenant isolation"
+        },
+        "traceos.customAgentCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Terminal command used when Custom command is selected in the TraceOS sidebar"
+        },
+        "traceos.autoSubmitPrompt": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically submit the final TraceOS prompt after inserting it into the agent terminal"
+        },
+        "traceos.autoStartCapture": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start TraceOS capture when a workspace opens."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@hydradb/sdk": "^2.0.0"
+  }
+}
