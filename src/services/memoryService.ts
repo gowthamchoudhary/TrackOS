@@ -75,6 +75,7 @@ export async function ingestMemory(
       "/api/memory/ingest",
       {
         userId: getUserId(workspace),
+        teamId: getTeamId(workspace),
         project: workspace.name,
         workspaceName: filtering.snapshot.workspaceName,
         snapshot: filtering.snapshot
@@ -114,6 +115,7 @@ export async function assembleManagedContext(
       "/api/context/assemble",
       {
         userId: getUserId(workspace),
+        teamId: getTeamId(workspace),
         project: workspace.name,
         request,
         snapshot
@@ -147,6 +149,7 @@ export async function ingestAgentEvidence(
       "/api/memory/agent-output",
       {
         userId: getUserId(workspace),
+        teamId: getTeamId(workspace),
         project: workspace.name,
         evidence: filtering.evidence
       }
@@ -404,6 +407,13 @@ function getUserId(workspace: WorkspaceInfo): string {
       .get<string>("userId", "local_user")
       .trim() || "local_user"
   );
+}
+
+function getTeamId(workspace: WorkspaceInfo): string {
+  return vscode.workspace
+    .getConfiguration("traceos", workspace.folder.uri)
+    .get<string>("teamId", "")
+    .trim();
 }
 
 function errorMessage(error: unknown): string {

@@ -67,6 +67,11 @@
           "default": "local_user",
           "description": "User ID used for managed TraceOS memory isolation"
         },
+        "traceos.teamId": {
+          "type": "string",
+          "default": "",
+          "description": "Team ID for shared TraceOS memory. When set, all team members with the same Team ID and project share memories."
+        },
         "traceos.customAgentCommand": {
           "type": "string",
           "default": "",
