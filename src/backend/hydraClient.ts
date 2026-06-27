@@ -36,17 +36,21 @@ export function isHydraConfigured(): boolean {
 
 export function getHydraConnection(
   project: string,
-  userId: string
+  userId: string,
+  teamId?: string
 ): HydraConnection {
   const token = process.env.HYDRA_DB_API_KEY?.trim();
   if (!token) {
     throw new Error("HYDRA_DB_API_KEY is not configured on the backend.");
   }
 
+  const normalizedTeamId = teamId?.trim();
   return {
     client: new HydraDBClient({ token }),
     tenantId: TENANT_ID,
-    subTenantId: `proj_${identifier(project)}__usr_${identifier(userId)}`
+    subTenantId: normalizedTeamId
+      ? `proj_${identifier(project)}__team_${identifier(normalizedTeamId)}`
+      : `proj_${identifier(project)}__usr_${identifier(userId)}`
   };
 }
 
