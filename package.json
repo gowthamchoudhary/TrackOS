@@ -15,8 +15,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onView:traceos.sidebar"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {

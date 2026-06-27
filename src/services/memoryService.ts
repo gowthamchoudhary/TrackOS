@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
 import * as vscode from "vscode";
 import {
   AgentEvidenceIngestionResult,
@@ -20,6 +22,8 @@ const ERROR_LIKE_PATTERN =
 const SUCCESS_LIKE_PATTERN =
   /\b(done|complete|completed|success|succeeded|fixed|passed|all tests passed)\b/i;
 const recentFingerprints = new Map<string, number>();
+const loadedFingerprintFiles = new Set<string>();
+const startupFingerprintLoad = loadStartupFingerprints();
 const previousAgentFailureByWorkspace = new Map<string, boolean>();
 
 interface IngestResponse {
@@ -52,6 +56,7 @@ export async function ingestMemory(
   snapshot: Snapshot,
   workspace: WorkspaceInfo
 ): Promise<MemoryIngestionResult> {
+  await loadRecentFingerprints(workspace);
   const filtering = await filterSnapshotForIngestion(snapshot, workspace);
   if (!filtering.shouldIngest) {
     return {
@@ -75,7 +80,7 @@ export async function ingestMemory(
         snapshot: filtering.snapshot
       }
     );
-    rememberFingerprints(filtering.fingerprints);
+    await rememberFingerprints(filtering.fingerprints, workspace);
 
     return {
       received: response.received,
@@ -125,7 +130,8 @@ export async function ingestAgentEvidence(
   evidence: AgentRunEvidence,
   workspace: WorkspaceInfo
 ): Promise<AgentEvidenceIngestionResult> {
-  const filtering = filterAgentEvidenceForIngestion(evidence, workspace);
+  await loadRecentFingerprints(workspace);
+  const filtering = await filterAgentEvidenceForIngestion(evidence, workspace);
   if (!filtering.shouldIngest) {
     return {
       attempted: 0,
@@ -145,7 +151,7 @@ export async function ingestAgentEvidence(
         evidence: filtering.evidence
       }
     );
-    rememberFingerprints(filtering.fingerprints);
+    await rememberFingerprints(filtering.fingerprints, workspace);
     previousAgentFailureByWorkspace.set(
       workspace.rootPath,
       evidence.exitCode !== 0
@@ -178,7 +184,7 @@ async function filterSnapshotForIngestion(
   fingerprints: string[];
   reasons: string[];
 }> {
-  pruneRecentFingerprints();
+  await pruneRecentFingerprints(workspace);
   const previous = await new SessionStore(workspace).read();
   const previousSnapshots = previous.snapshots.filter(
     (candidate) => candidate.id !== snapshot.id
@@ -267,16 +273,16 @@ async function filterSnapshotForIngestion(
   };
 }
 
-function filterAgentEvidenceForIngestion(
+async function filterAgentEvidenceForIngestion(
   evidence: AgentRunEvidence,
   workspace: WorkspaceInfo
-): {
+): Promise<{
   shouldIngest: boolean;
   evidence: AgentRunEvidence;
   fingerprints: string[];
   reasons: string[];
-} {
-  pruneRecentFingerprints();
+}> {
+  await pruneRecentFingerprints(workspace);
   const hadPreviousFailure =
     previousAgentFailureByWorkspace.get(workspace.rootPath) === true;
   const outputHasError = ERROR_LIKE_PATTERN.test(evidence.output);
@@ -475,19 +481,104 @@ function wasRecentlyIngested(fingerprint: string): boolean {
   );
 }
 
-function rememberFingerprints(fingerprints: string[]): void {
+async function loadStartupFingerprints(): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  await Promise.all(
+    folders
+      .filter((folder) => folder.uri.scheme === "file")
+      .map((folder) =>
+        loadFingerprintFile(
+          path.join(folder.uri.fsPath, ".traceos", "fingerprints.json")
+        )
+      )
+  );
+}
+
+async function loadRecentFingerprints(workspace: WorkspaceInfo): Promise<void> {
+  await startupFingerprintLoad;
+  await loadFingerprintFile(fingerprintFile(workspace));
+}
+
+async function loadFingerprintFile(filePath: string): Promise<void> {
+  if (loadedFingerprintFiles.has(filePath)) {
+    return;
+  }
+  loadedFingerprintFiles.add(filePath);
+
+  let contents: string;
+  try {
+    contents = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn(
+        `[TraceOS] Failed to read diagnostic fingerprints: ${errorMessage(error)}`
+      );
+    }
+    return;
+  }
+
+  try {
+    const persisted = JSON.parse(contents) as Record<string, unknown>;
+    const now = Date.now();
+    for (const [fingerprint, ingestedAt] of Object.entries(persisted)) {
+      if (
+        typeof ingestedAt === "number" &&
+        Number.isFinite(ingestedAt) &&
+        now - ingestedAt < DEDUPE_WINDOW_MS
+      ) {
+        recentFingerprints.set(fingerprint, ingestedAt);
+      }
+    }
+  } catch (error) {
+    console.warn(
+      `[TraceOS] Failed to parse diagnostic fingerprints: ${errorMessage(error)}`
+    );
+  }
+}
+
+async function rememberFingerprints(
+  fingerprints: string[],
+  workspace: WorkspaceInfo
+): Promise<void> {
   const now = Date.now();
   for (const fingerprint of fingerprints) {
     recentFingerprints.set(fingerprint, now);
   }
-  pruneRecentFingerprints();
+  await pruneRecentFingerprints(workspace);
 }
 
-function pruneRecentFingerprints(): void {
+async function pruneRecentFingerprints(workspace: WorkspaceInfo): Promise<void> {
   const now = Date.now();
   for (const [fingerprint, ingestedAt] of recentFingerprints) {
     if (now - ingestedAt >= DEDUPE_WINDOW_MS) {
       recentFingerprints.delete(fingerprint);
     }
   }
+  await persistRecentFingerprints(workspace);
+}
+
+async function persistRecentFingerprints(
+  workspace: WorkspaceInfo
+): Promise<void> {
+  const fingerprints = Object.fromEntries(
+    [...recentFingerprints].filter(
+      ([, ingestedAt]) => Date.now() - ingestedAt < DEDUPE_WINDOW_MS
+    )
+  );
+  try {
+    await fs.mkdir(workspace.traceDirectory, { recursive: true });
+    await fs.writeFile(
+      fingerprintFile(workspace),
+      `${JSON.stringify(fingerprints, null, 2)}\n`,
+      "utf8"
+    );
+  } catch (error) {
+    console.warn(
+      `[TraceOS] Failed to persist diagnostic fingerprints: ${errorMessage(error)}`
+    );
+  }
+}
+
+function fingerprintFile(workspace: WorkspaceInfo): string {
+  return path.join(workspace.traceDirectory, "fingerprints.json");
 }
