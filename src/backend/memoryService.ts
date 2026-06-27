@@ -90,11 +90,23 @@ export async function ingestAgentOutput(
     };
   }
 
-  await ingestTraceMemories(project, userId, memories);
+  // FIX: deduplicate memories by ID before ingesting.
+  // agentEvidenceToMemories can produce :output, :error, and :command_failure
+  // for the same evidence.id. If the same session runs twice (e.g. agent
+  // retried), we'd get bc1bc3ee:error stored multiple times. Deduplicating
+  // here prevents that before it even reaches HydraDB.
+  const deduped = deduplicateMemoriesById(memories);
+  if (deduped.length < memories.length) {
+    console.log(
+      `[TraceOS Backend] Deduplicated ${memories.length - deduped.length} duplicate agent memory item${plural(memories.length - deduped.length)} before ingest.`
+    );
+  }
+
+  await ingestTraceMemories(project, userId, deduped);
   return {
-    attempted: memories.length,
-    ingested: memories.length,
-    message: `Stored ${memories.length} real agent memory item${plural(memories.length)} in HydraDB.`
+    attempted: deduped.length,
+    ingested: deduped.length,
+    message: `Stored ${deduped.length} real agent memory item${plural(deduped.length)} in HydraDB.`
   };
 }
 
@@ -202,7 +214,8 @@ export function snapshotToMemories(
     });
   }
 
-  return memories;
+  // FIX: deduplicate snapshot memories by ID too (defensive)
+  return deduplicateMemoriesById(memories);
 }
 
 export function agentEvidenceToMemories(
@@ -223,23 +236,34 @@ export function agentEvidenceToMemories(
     memories.push({
       ...common,
       id: `${evidence.id}:output`,
+      // FIX: summary is the actual command run, not a useless raw ID
       label: `${evidence.agentId} agent output`,
       eventType: "agent_output",
       rawEvidence: evidence.output,
-      summary: `Exact captured stdout/stderr from ${evidence.command}.`,
+      summary: `Captured stdout/stderr from: ${evidence.command}`,
       tags: ["agent", evidence.agentId, "output"],
       importance: "medium"
     });
   }
 
   if (evidence.errorPatterns.length > 0) {
+    // FIX: summary shows WHAT matched, not just a generic label
+    const matchedPatterns = evidence.errorPatterns.join(", ");
+    const firstErrorLine = evidence.output
+      ?.split(/\r?\n/)
+      .find((line) => /error|fail|exception/i.test(line))
+      ?.trim()
+      .slice(0, 200);
+
     memories.push({
       ...common,
       id: `${evidence.id}:error`,
       label: `${evidence.agentId} agent error output`,
       eventType: "agent_error",
       rawEvidence: evidence.output || evidence.stderr,
-      summary: `Captured agent output matched: ${evidence.errorPatterns.join(", ")}.`,
+      summary: firstErrorLine
+        ? `Matched [${matchedPatterns}]: ${firstErrorLine}`
+        : `Agent output matched error patterns: ${matchedPatterns}`,
       tags: ["agent", evidence.agentId, "error", ...evidence.errorPatterns],
       importance: "high"
     });
@@ -262,13 +286,31 @@ export function agentEvidenceToMemories(
         null,
         2
       ),
-      summary: `${evidence.command} exited with code ${String(evidence.exitCode)}.`,
+      // FIX: summary includes command and exit code, not just exit code
+      summary: `Command "${evidence.command}" exited with code ${String(evidence.exitCode)}.`,
       tags: ["agent", evidence.agentId, "command-failure"],
       importance: "high"
     });
   }
 
   return memories;
+}
+
+/**
+ * FIX: Deduplicate a list of memories by their ID.
+ * Keeps the first occurrence of each ID (which is the most specific/recent).
+ * This prevents the same bc1bc3ee:error from being written to HydraDB
+ * multiple times across repeated agent runs.
+ */
+function deduplicateMemoriesById(memories: TraceMemory[]): TraceMemory[] {
+  const seen = new Set<string>();
+  return memories.filter((memory) => {
+    if (seen.has(memory.id)) {
+      return false;
+    }
+    seen.add(memory.id);
+    return true;
+  });
 }
 
 function diagnosticMemory(
