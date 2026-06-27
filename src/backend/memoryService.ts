@@ -35,7 +35,8 @@ export async function ingestMemory(
   userId: string,
   project: string,
   snapshot: Snapshot,
-  registry: DiagnosticRegistry
+  registry: DiagnosticRegistry,
+  teamId?: string
 ): Promise<IngestionResult> {
   const repeated = await registry.findRepeated(project, userId, snapshot);
   const memories = snapshotToMemories(snapshot, project, userId, repeated);
@@ -65,7 +66,7 @@ export async function ingestMemory(
     };
   }
 
-  await ingestTraceMemories(project, userId, memories);
+  await ingestTraceMemories(project, userId, memories, teamId);
 
   return {
     received,
@@ -79,7 +80,8 @@ export async function ingestMemory(
 export async function ingestAgentOutput(
   userId: string,
   project: string,
-  evidence: AgentRunEvidence
+  evidence: AgentRunEvidence,
+  teamId?: string
 ): Promise<AgentIngestionResult> {
   const memories = agentEvidenceToMemories(evidence, project, userId);
   if (memories.length === 0) {
@@ -102,7 +104,7 @@ export async function ingestAgentOutput(
     );
   }
 
-  await ingestTraceMemories(project, userId, deduped);
+  await ingestTraceMemories(project, userId, deduped, teamId);
   return {
     attempted: deduped.length,
     ingested: deduped.length,
@@ -114,9 +116,10 @@ export async function recallRelevantContext(
   userId: string,
   project: string,
   request: string,
-  snapshot: Snapshot
+  snapshot: Snapshot,
+  teamId?: string
 ): Promise<MemoryRecallResult> {
-  const connection = getHydraConnection(project, userId);
+  const connection = getHydraConnection(project, userId, teamId);
   const response = await connection.client.query({
     tenantId: connection.tenantId,
     subTenantId: connection.subTenantId,
@@ -399,10 +402,11 @@ function errorMessage(error: unknown): string {
 async function ingestTraceMemories(
   project: string,
   userId: string,
-  memories: TraceMemory[]
+  memories: TraceMemory[],
+  teamId?: string
 ): Promise<void> {
   try {
-    const connection = getHydraConnection(project, userId);
+    const connection = getHydraConnection(project, userId, teamId);
     const hydraMemories = buildHydraMemoryPayload(memories);
     logHydraIngestRequest(connection, hydraMemories);
     await connection.client.context.ingest({

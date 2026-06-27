@@ -16,6 +16,7 @@ const registry = new DiagnosticRegistry();
 
 interface IngestBody {
   userId: string;
+  teamId?: string;
   project: string;
   workspaceName: string;
   snapshot: Snapshot;
@@ -23,6 +24,7 @@ interface IngestBody {
 
 interface AssembleBody {
   userId: string;
+  teamId?: string;
   project: string;
   request: string;
   snapshot: Snapshot;
@@ -30,6 +32,7 @@ interface AssembleBody {
 
 interface AgentOutputBody {
   userId: string;
+  teamId?: string;
   project: string;
   evidence: AgentRunEvidence;
 }
@@ -84,7 +87,8 @@ async function route(
       body.userId,
       body.project,
       body.snapshot,
-      registry
+      registry,
+      body.teamId
     );
     sendJson(response, 200, { ok: true, ...result });
     return;
@@ -106,7 +110,8 @@ async function route(
     const result = await ingestAgentOutput(
       body.userId,
       body.project,
-      body.evidence
+      body.evidence,
+      body.teamId
     );
     sendJson(response, 200, { ok: true, ...result });
     return;
@@ -118,7 +123,8 @@ async function route(
       body.userId,
       body.project,
       body.request,
-      body.snapshot
+      body.snapshot,
+      body.teamId
     );
     const markdown = assembleContext(
       body.request,
@@ -157,6 +163,7 @@ function requireIngestBody(value: unknown): IngestBody {
   const body = requireObject(value);
   if (
     !isNonEmptyString(body.userId) ||
+    !isOptionalString(body.teamId) ||
     !isNonEmptyString(body.project) ||
     !isNonEmptyString(body.workspaceName) ||
     !isSnapshot(body.snapshot)
@@ -170,6 +177,7 @@ function requireAssembleBody(value: unknown): AssembleBody {
   const body = requireObject(value);
   if (
     !isNonEmptyString(body.userId) ||
+    !isOptionalString(body.teamId) ||
     !isNonEmptyString(body.project) ||
     !isNonEmptyString(body.request) ||
     !isSnapshot(body.snapshot)
@@ -183,6 +191,7 @@ function requireAgentOutputBody(value: unknown): AgentOutputBody {
   const body = requireObject(value);
   if (
     !isNonEmptyString(body.userId) ||
+    !isOptionalString(body.teamId) ||
     !isNonEmptyString(body.project) ||
     !isAgentRunEvidence(body.evidence)
   ) {
@@ -238,6 +247,10 @@ function isAgentRunEvidence(value: unknown): value is AgentRunEvidence {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === "string";
 }
 
 function sendJson(
