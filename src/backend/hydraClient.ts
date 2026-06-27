@@ -13,19 +13,21 @@ export interface HydraConnection {
 interface HydraMemoryMetadata {
   event_type: TraceMemoryEventType;
   project: string;
+  trace_id: string;
+  tags: string[];
+  importance: "low" | "medium" | "high";
+  timestamp: string;
+  file_path?: string;
+  // FIX: store human label separately so summary isn't the raw ID
+  label: string;
 }
 
 interface HydraMemoryItem {
-  id: string;
-  label: string;
+  source_id: string;
+  title: string;
   text: string;
-  is_markdown: true;
   infer: boolean;
   metadata: HydraMemoryMetadata;
-  additional_metadata: Record<string, unknown>;
-  relations?: {
-    ids: string[];
-  };
 }
 
 export function isHydraConfigured(): boolean {
@@ -50,31 +52,28 @@ export function getHydraConnection(
 
 export function buildHydraMemoryPayload(memories: TraceMemory[]): string {
   const items: HydraMemoryItem[] = memories.map((memory) => {
-    const additionalMetadata: Record<string, unknown> = {
+    const metadata: HydraMemoryMetadata = {
+      event_type: memory.eventType,
+      project: memory.project,
+      trace_id: memory.id,
       tags: memory.tags ?? [],
       importance: memory.importance ?? "medium",
-      timestamp: memory.timestamp
+      timestamp: memory.timestamp,
+      // FIX: store the human-readable label in metadata so we can recover it
+      label: memory.label
     };
 
     if (memory.filePath) {
-      additionalMetadata.file_path = memory.filePath;
+      metadata.file_path = memory.filePath;
     }
 
     return {
-      id: memory.id,
-      label: memory.label,
+      source_id: memory.id,
+      // FIX: title is the human label, not the ID
+      title: memory.label,
       text: formatMemoryText(memory),
-      is_markdown: true,
       infer: memory.infer,
-      // Live HydraDB SDK expects metadata as an object inside the JSON-stringified memories array.
-      metadata: {
-        event_type: memory.eventType,
-        project: memory.project
-      },
-      additional_metadata: additionalMetadata,
-      ...(memory.relatedIds?.length
-        ? { relations: { ids: memory.relatedIds } }
-        : {})
+      metadata
     };
   });
 
@@ -111,9 +110,7 @@ export function logHydraIngestRequest(
     "raw memories first 1000 chars": memories.slice(0, 1000),
     "parsed memories[0]": firstMemory,
     "typeof parsed memories[0].metadata": typeof firstMemoryObject?.metadata,
-    "parsed memories[0].metadata value": firstMemoryObject?.metadata,
-    "typeof parsed memories[0].additional_metadata":
-      typeof firstMemoryObject?.additional_metadata
+    "parsed memories[0].metadata value": firstMemoryObject?.metadata
   });
 }
 
@@ -123,6 +120,9 @@ export function parseHydraMemories(
   userId: string
 ): TraceMemory[] {
   const memories: TraceMemory[] = [];
+  // FIX: deduplicate by trace_id — same session ID arriving multiple times
+  // from HydraDB (e.g. bc1bc3ee:error appearing 4x) gets collapsed to one.
+  const seenTraceIds = new Set<string>();
 
   for (const chunk of response.data?.chunks ?? []) {
     const metadata = chunk.metadata ?? {};
@@ -131,20 +131,49 @@ export function parseHydraMemories(
       continue;
     }
 
+    const traceId = readString(metadata.trace_id) || chunk.id;
+
+    // FIX: skip duplicates — only keep the first occurrence of each trace_id
+    if (seenTraceIds.has(traceId)) {
+      continue;
+    }
+    seenTraceIds.add(traceId);
+
     const additionalMetadata = chunk.additionalMetadata ?? {};
+
+    // FIX: recover the human-readable label from metadata.label first,
+    // then fall back to sourceTitle, then the trace_id as last resort.
+    const humanLabel =
+      readString(metadata.label) ||
+      readString(chunk.sourceTitle) ||
+      traceId;
+
+    // FIX: build a real summary from the chunk content rather than using
+    // the raw ID. Extract the Summary section if present in the stored text.
+    const recoveredSummary = extractSummarySection(chunk.chunkContent) ||
+      humanLabel;
+
     memories.push({
-      id: chunk.id,
-      label: chunk.sourceTitle || chunk.id,
+      id: traceId,
+      label: humanLabel,
       eventType,
       project: readString(metadata.project) || project,
       userId,
-      rawEvidence: chunk.chunkContent,
-      summary: chunk.sourceTitle || chunk.chunkContent,
-      filePath: readString(additionalMetadata.file_path),
-      tags: readStringArray(additionalMetadata.tags),
-      importance: readImportance(additionalMetadata.importance),
+      // FIX: sanitize UTF-8 encoding corruption (double-encoded apostrophes etc.)
+      rawEvidence: repairMojibake(chunk.chunkContent),
+      summary: repairMojibake(recoveredSummary),
+      filePath:
+        readString(metadata.file_path) ||
+        readString(additionalMetadata.file_path),
+      tags:
+        readStringArray(metadata.tags) ||
+        readStringArray(additionalMetadata.tags),
+      importance:
+        readImportance(metadata.importance) ||
+        readImportance(additionalMetadata.importance),
       infer: eventType === "pattern",
       timestamp:
+        readString(metadata.timestamp) ||
         readString(additionalMetadata.timestamp) ||
         chunk.sourceUploadTime ||
         chunk.sourceLastUpdatedTime ||
@@ -170,11 +199,12 @@ function formatMemoryText(memory: TraceMemory): string {
     "",
     "## Summary",
     "",
-    memory.summary,
+    // FIX: sanitize on the way in too so stored text is clean
+    repairMojibake(memory.summary),
     "",
     "## Raw Evidence",
     "",
-    fenced(memory.rawEvidence)
+    fenced(repairMojibake(memory.rawEvidence))
   ].join("\n");
 }
 
@@ -182,6 +212,97 @@ function fenced(content: string): string {
   const fence = content.includes("```") ? "````" : "```";
   return `${fence}text\n${content}\n${fence}`;
 }
+
+/**
+ * FIX: Extract the "## Summary" section from stored memory text.
+ * When we retrieve a chunk whose text was written by formatMemoryText,
+ * we can pull out the human summary rather than returning the raw ID.
+ */
+function extractSummarySection(text: string): string | undefined {
+  const match = text.match(/^## Summary\s*\n+([\s\S]*?)(?:\n+## |\n*$)/m);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+  return undefined;
+}
+
+function repairMojibake(value: string): string {
+  if (!value || !looksLikeMojibake(value)) {
+    return value;
+  }
+
+  let best = value;
+  let candidate = value;
+  for (let i = 0; i < 3; i += 1) {
+    const decoded = decodeMojibakePass(candidate);
+    if (!decoded || decoded === candidate) {
+      break;
+    }
+    candidate = decoded;
+    if (mojibakeScore(candidate) < mojibakeScore(best)) {
+      best = candidate;
+    }
+  }
+
+  return mojibakeScore(best) < mojibakeScore(value) ? best : value;
+}
+
+function looksLikeMojibake(value: string): boolean {
+  return /[ÃÂâ]/.test(value);
+}
+
+function mojibakeScore(value: string): number {
+  return (
+    (value.match(/\uFFFD/g) ?? []).length * 5 +
+    (value.match(/[ÃÂ]/g) ?? []).length * 2 +
+    (value.match(/â/g) ?? []).length
+  );
+}
+
+function decodeMojibakePass(value: string): string | undefined {
+  const bytes: number[] = [];
+  for (const char of value) {
+    const byte = WINDOWS_1252_BYTES.get(char) ?? char.charCodeAt(0);
+    if (byte < 0 || byte > 255) {
+      return undefined;
+    }
+    bytes.push(byte);
+  }
+
+  return new TextDecoder("utf-8", { fatal: false }).decode(
+    Uint8Array.from(bytes)
+  );
+}
+
+const WINDOWS_1252_BYTES = new Map<string, number>([
+  ["€", 0x80],
+  ["‚", 0x82],
+  ["ƒ", 0x83],
+  ["„", 0x84],
+  ["…", 0x85],
+  ["†", 0x86],
+  ["‡", 0x87],
+  ["ˆ", 0x88],
+  ["‰", 0x89],
+  ["Š", 0x8a],
+  ["‹", 0x8b],
+  ["Œ", 0x8c],
+  ["Ž", 0x8e],
+  ["‘", 0x91],
+  ["’", 0x92],
+  ["“", 0x93],
+  ["”", 0x94],
+  ["•", 0x95],
+  ["–", 0x96],
+  ["—", 0x97],
+  ["˜", 0x98],
+  ["™", 0x99],
+  ["š", 0x9a],
+  ["›", 0x9b],
+  ["œ", 0x9c],
+  ["ž", 0x9e],
+  ["Ÿ", 0x9f]
+]);
 
 function readEventType(
   metadata: Record<string, unknown>
