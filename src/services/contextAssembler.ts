@@ -36,9 +36,23 @@ export function assembleContext(
       ].join("\n")
     ),
     section("Current Exact Diagnostics", formatDiagnostics(current.diagnostics)),
-    section("Current Git Status", formatGitStatus(current)),
-    section("Current Git Diff Summary", formatGitDiff(current)),
-    section("Recent Terminal Log Evidence", formatTerminalLog(current.terminalLog)),
+    section("Current Git Status", formatGitStatus(current))
+  ];
+
+  if (shouldIncludeGitDiff(request, current)) {
+    sections.push(section("Current Git Diff Summary", formatGitDiff(current)));
+  }
+
+  if (ERROR_LIKE_PATTERN.test(current.terminalLog)) {
+    sections.push(
+      section(
+        "Recent Terminal Log Evidence",
+        formatTerminalLog(current.terminalLog)
+      )
+    );
+  }
+
+  sections.push(
     section(
       "Repeated Diagnostics From Session",
       formatRepeatedDiagnostics(current.diagnostics, previousSnapshots)
@@ -54,7 +68,7 @@ export function assembleContext(
         "* Ask for missing evidence if required."
       ].join("\n")
     )
-  ];
+  );
 
   return `${sections.join("\n\n")}\n`;
 }
@@ -184,7 +198,7 @@ function formatMemories(recall: MemoryRecallResult): string {
   const memories = recall.memories
     .filter(isRelevantMemory)
     .sort(memoryPriority)
-    .slice(0, 8);
+    .slice(0, 5);
 
   if (memories.length === 0) {
     return "Retrieved managed memories did not match TraceOS relevance filters.";
@@ -259,6 +273,26 @@ function summarizeMemoryEvidence(memory: TraceMemory): string {
 
 function hasErrorLikeDiffLine(diff: string): boolean {
   return diff.split(/\r?\n/).some((line) => ERROR_LIKE_PATTERN.test(line));
+}
+
+function shouldIncludeGitDiff(request: string, snapshot: Snapshot): boolean {
+  if (!snapshot.git.diff && !snapshot.git.diffStat) {
+    return false;
+  }
+  return (
+    snapshot.git.changedFiles.some((filePath) =>
+      isRequestRelated(request, filePath)
+    ) || hasErrorLikeDiffLine(snapshot.git.diff)
+  );
+}
+
+function isRequestRelated(request: string, filePath: string): boolean {
+  const normalizedFilePath = filePath.toLowerCase();
+  return request
+    .toLowerCase()
+    .split(/[^a-z0-9_-]+/)
+    .filter((word) => word.length > 4)
+    .some((word) => normalizedFilePath.includes(word));
 }
 
 function firstMatchingLines(value: string, pattern: RegExp): string {
