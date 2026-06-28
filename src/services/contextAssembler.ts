@@ -158,18 +158,45 @@ async function buildSkillReport(
           temperature: 0,
           messages: [{
             role: "user",
-            content: `You are helping a coding agent pick the right skills for a task.
+            content: `You are a skill selector for an AI coding agent.
 
-User request: ${userRequest}
-Current errors: ${diagnosticSummary}
-Project packages detected: ${detected.join(", ") || "none"}
+The agent is about to work on a task. Your job is to pick the 
+right skills from Skillmake marketplace to help it succeed.
 
-Available skills: ${AVAILABLE_SKILLS.join(", ")}
+USER REQUEST: ${userRequest}
 
-Return ONLY a JSON array of skill names needed for this task.
-Maximum 3 skills. Return [] if none are relevant.
-Example: ["mp-diagnose", "supabase-agent-skills"]
-Return only the JSON array, nothing else.`
+CURRENT PROJECT PACKAGES: ${detected.join(", ") || "none detected"}
+
+CURRENT ERRORS IN EDITOR: ${diagnosticSummary}
+
+AVAILABLE SKILLS ON SKILLMAKE:
+- mp-diagnose: debugging, diagnosing errors, finding root causes
+- mp-tdd: test driven development, writing tests, fixing test failures
+- supabase-agent-skills: Supabase database, auth, RLS, realtime, storage
+- shadcn-ui-skill: shadcn/ui components, installation, usage
+- framer-motion: animations, transitions, motion components
+- playwright-skill: Playwright browser testing, e2e tests
+- better-auth-nextjs: authentication in Next.js, OAuth, sessions
+- anthropic-frontend-design: frontend UI, React components, design systems
+- claude-api: Anthropic Claude API, model calls, streaming
+- linear-claude-skill: Linear issue tracking integration
+- cloudflare-workers-deploy: Cloudflare Workers, deployment, edge functions
+
+YOUR TASK:
+1. Read the user request carefully
+2. Identify ALL technologies mentioned or implied — even if not in package.json
+3. Match them to the most relevant skills above
+4. Also consider current errors when picking skills
+
+RULES:
+- Pick skills based on what the USER NEEDS, not just what is installed
+- If user mentions a technology not in packages, still pick the skill
+- Maximum 3 skills
+- Only pick from the exact skill names listed above
+- Return [] if nothing is relevant
+
+Return ONLY a raw JSON array. No explanation. No markdown. No backticks.
+Example: ["mp-diagnose", "supabase-agent-skills"]`
           }]
         })
       });
