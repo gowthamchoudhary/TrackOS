@@ -3,7 +3,7 @@ import { assembleContext } from "../services/contextAssembler";
 import { AgentRunEvidence } from "../types/memory";
 import { Snapshot } from "../types/snapshot";
 import { DiagnosticRegistry } from "./diagnosticRegistry";
-import { isHydraConfigured } from "./hydraClient";
+import { getHydraConnection, isHydraConfigured } from "./hydraClient";
 import {
   ingestAgentOutput,
   ingestMemory,
@@ -35,6 +35,10 @@ interface AgentOutputBody {
   teamId?: string;
   project: string;
   evidence: AgentRunEvidence;
+}
+
+interface HydraSubTenantDeleteClient {
+  deleteSubTenant(subTenantId: string): Promise<unknown>;
 }
 
 const server = createServer(async (request, response) => {
@@ -114,6 +118,21 @@ async function route(
       body.teamId
     );
     sendJson(response, 200, { ok: true, ...result });
+    return;
+  }
+
+  if (method === "DELETE" && path === "/api/memory/clear") {
+    try {
+      const { project } = requireObject(await readJson(request)) as {
+        project?: string;
+      };
+      const conn = getHydraConnection(project ?? "traceos", "admin");
+      await (conn.client as unknown as HydraSubTenantDeleteClient)
+        .deleteSubTenant(conn.subTenantId);
+      sendJson(response, 200, { ok: true, message: "Memory cleared" });
+    } catch (err) {
+      sendJson(response, 500, { ok: false, error: String(err) });
+    }
     return;
   }
 
