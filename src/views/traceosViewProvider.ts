@@ -101,9 +101,13 @@ export class TraceosViewProvider implements vscode.WebviewViewProvider {
             message.teamCode,
             vscode.ConfigurationTarget.Global
           );
+        const workspaceName = vscode.workspace.name ??
+          vscode.workspace.workspaceFolders?.[0]?.name ??
+          "Unknown Project";
         await webviewView.webview.postMessage({
           type: "restoreTeamCode",
-          teamCode: message.teamCode
+          teamCode: message.teamCode,
+          projectName: workspaceName
         });
         return;
       }
@@ -263,9 +267,13 @@ async function postTeamCode(webview: vscode.Webview): Promise<void> {
   const currentTeamId = vscode.workspace
     .getConfiguration("traceos")
     .get<string>("teamId", "");
+  const workspaceName = vscode.workspace.name ??
+    vscode.workspace.workspaceFolders?.[0]?.name ??
+    "Unknown Project";
   await webview.postMessage({
     type: "restoreTeamCode",
-    teamCode: currentTeamId
+    teamCode: currentTeamId,
+    projectName: workspaceName
   });
 }
 
@@ -521,6 +529,7 @@ function getHtml(webview: vscode.Webview): string {
     .team-join-row { display: flex; gap: 6px; }
     .team-join-row input { flex: 1; padding: 4px 8px; font-size: 11px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 3px; }
     .team-code-display { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .team-project-row { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-top: 2px; }
     .team-code-label { color: var(--vscode-descriptionForeground); }
     .team-code-value { font-family: monospace; font-size: 10px; color: var(--vscode-textLink-foreground); word-break: break-all; }
     .btn-secondary { padding: 4px 10px; font-size: 11px; cursor: pointer; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; }
@@ -638,6 +647,10 @@ function getHtml(webview: vscode.Webview): string {
           <span class="team-code-label">Team Code:</span>
           <span id="current-team-code" class="team-code-value">&mdash;</span>
           <button class="btn-icon" id="copy-team-code-btn" title="Copy team code">&#x29C9;</button>
+        </div>
+        <div class="team-project-row">
+          <span class="team-code-label">Project:</span>
+          <span id="team-project-name" class="team-code-value">—</span>
         </div>
         <button class="btn-secondary btn-leave" id="leave-team-btn">Leave Team</button>
       </div>
@@ -820,6 +833,10 @@ function getHtml(webview: vscode.Webview): string {
       document.getElementById("team-mode").style.display = "flex";
       document.getElementById("current-team-code").textContent = code;
       document.getElementById("team-mode-label").textContent = "Team Mode Active";
+      const workspaceName = document.title ||
+        window.location.pathname.split('/').pop() ||
+        'current project';
+      document.getElementById('team-project-name').textContent = workspaceName;
     }
 
     function showSoloMode() {
@@ -862,6 +879,8 @@ function getHtml(webview: vscode.Webview): string {
       if (event.data.type === "restoreTeamCode") {
         if (event.data.teamCode) {
           showTeamMode(event.data.teamCode);
+          const el = document.getElementById('team-project-name');
+          if (el) el.textContent = event.data.projectName || 'Unknown Project';
         } else {
           showSoloMode();
         }
