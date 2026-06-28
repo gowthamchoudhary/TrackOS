@@ -117,56 +117,85 @@ function getCachedOrFetchSkill(skillName: string): string | undefined {
   }
 }
 
-function buildSkillReport(
+async function buildSkillReport(
   workspaceRoot: string,
   userRequest: string,
   diagnostics: DiagnosticEvidence[]
-): { reportSection: string; skillsContent: string } {
+): Promise<{ reportSection: string; skillsContent: string }> {
+
+  const AVAILABLE_SKILLS = [
+    "mp-diagnose",
+    "mp-tdd",
+    "supabase-agent-skills",
+    "shadcn-ui-skill",
+    "framer-motion",
+    "playwright-skill",
+    "better-auth-nextjs",
+    "anthropic-frontend-design",
+    "claude-api",
+    "linear-claude-skill",
+    "cloudflare-workers-deploy"
+  ];
+
   const detected = analyzeProjectDependencies(workspaceRoot);
+  const diagnosticSummary = diagnostics.length > 0
+    ? diagnostics.map(d => d.message).slice(0, 5).join(", ")
+    : "none";
 
-  // Also check user request for additional skill hints
-  const requestLower = userRequest.toLowerCase();
-  const automaticSkills: string[] = [];
-  if (diagnostics.length > 0) {
-    automaticSkills.push("mp-diagnose");
-  }
-  if (/\b(fix|error|bug|broken|failing|crash|test)\b/.test(requestLower)) {
-    automaticSkills.push("mp-tdd");
-  }
-  if (/\b(claude|anthropic|ai|llm|model|api)\b/.test(requestLower)) {
-    automaticSkills.push("claude-api");
-  }
-  const requestSkillMap: Record<string, string> = {
-    "supabase": "supabase-agent-skills",
-    "shadcn": "shadcn-ui-skill",
-    "framer": "framer-motion",
-    "playwright": "playwright-skill",
-    "auth": "better-auth-nextjs",
-    "tailwind": "anthropic-frontend-design",
-    "frontend": "anthropic-frontend-design",
-    "ui": "anthropic-frontend-design",
-    "test": "mp-tdd",
-    "tdd": "mp-tdd",
-    "diagnose": "mp-diagnose",
-    "debug": "mp-diagnose",
-    "claude": "claude-api",
-    "anthropic": "claude-api"
-  };
-  const fromRequest: string[] = [];
-  for (const [keyword, skill] of Object.entries(requestSkillMap)) {
-    if (requestLower.includes(keyword) && !detected.includes(skill)) {
-      fromRequest.push(skill);
+  let chosenSkills: string[] = [];
+  try {
+    const groqKey = process.env.GROQ_API_KEY ?? "";
+    if (groqKey) {
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "authorization": `Bearer ${groqKey}`
+        },
+        body: JSON.stringify({
+          model: "llama-3.1-8b-instant",
+          max_tokens: 100,
+          temperature: 0,
+          messages: [{
+            role: "user",
+            content: `You are helping a coding agent pick the right skills for a task.
+
+User request: ${userRequest}
+Current errors: ${diagnosticSummary}
+Project packages detected: ${detected.join(", ") || "none"}
+
+Available skills: ${AVAILABLE_SKILLS.join(", ")}
+
+Return ONLY a JSON array of skill names needed for this task.
+Maximum 3 skills. Return [] if none are relevant.
+Example: ["mp-diagnose", "supabase-agent-skills"]
+Return only the JSON array, nothing else.`
+          }]
+        })
+      });
+      const data = await response.json() as {
+        choices: Array<{ message: { content: string } }>
+      };
+      const text = data.choices?.[0]?.message?.content ?? "[]";
+      const cleaned = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(cleaned) as string[];
+      chosenSkills = parsed.filter(s => AVAILABLE_SKILLS.includes(s));
     }
+  } catch {
+    chosenSkills = detected.slice(0, 3);
   }
-  const allSkills = [...new Set([...detected, ...automaticSkills, ...fromRequest])];
 
-  if (allSkills.length === 0) {
+  if (chosenSkills.length === 0) {
     return { reportSection: "", skillsContent: "" };
   }
 
-  // Resolve each skill - cached or fresh
-  const results: Array<{ skill: string; status: "cached" | "downloaded" | "unavailable"; content?: string }> = [];
-  for (const skill of allSkills) {
+  const results: Array<{
+    skill: string;
+    status: "cached" | "downloaded" | "unavailable";
+    content?: string
+  }> = [];
+
+  for (const skill of chosenSkills) {
     const content = getCachedOrFetchSkill(skill);
     const cacheDir = getSkillCacheDir();
     const path = require("node:path") as typeof import("node:path");
@@ -176,47 +205,33 @@ function buildSkillReport(
     if (!content) {
       status = "unavailable";
     } else if (fs.existsSync(metaPath)) {
-      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as { fetchedAt: number };
-      const age = Date.now() - meta.fetchedAt;
-      status = age < 5000 ? "downloaded" : "cached"; // downloaded if fetched in last 5 seconds
+      const meta = JSON.parse(
+        fs.readFileSync(metaPath, "utf8")
+      ) as { fetchedAt: number };
+      status = (Date.now() - meta.fetchedAt) < 5000 ? "downloaded" : "cached";
     } else {
       status = "downloaded";
     }
     results.push({ skill, status, content: content ?? undefined });
   }
 
-  // Build the report block
-  const detectedList = detected.length > 0
-    ? detected.map(s => `  ✓ ${s} (from package.json)`).join("\n")
-    : "  (none detected)";
-  const requestList = fromRequest.length > 0
-    ? fromRequest.map(s => `  ✓ ${s} (from request keywords)`).join("\n")
-    : "";
-  const automaticList = automaticSkills.length > 0
-    ? automaticSkills.map(s => `  ✓ ${s} (automatic)`).join("\n")
-    : "";
   const skillStatusList = results
     .map(r => {
       const icon = r.status === "unavailable" ? "✗" : "✓";
-      const label = r.status === "cached" ? "cached" : r.status === "downloaded" ? "downloaded" : "unavailable";
-      return `  ${icon} ${r.skill} (${label})`;
+      return `  ${icon} ${r.skill} (${r.status})`;
     })
     .join("\n");
 
   const reportSection = [
-    "## Skillmake - Project Skill Analysis",
+    "## Skillmake — AI Selected Skills",
     "",
-    "**Detected from package.json:**",
-    detectedList,
-    automaticList ? `\n**Detected automatically:**\n${automaticList}` : "",
-    requestList ? `\n**Detected from request:**\n${requestList}` : "",
+    `**Groq selected these skills for: "${userRequest.slice(0, 60)}"**`,
     "",
     "**Skills loaded:**",
     skillStatusList,
     ""
-  ].filter(l => l !== undefined).join("\n");
+  ].join("\n");
 
-  // Combine all available skill content
   const skillsContent = results
     .filter(r => r.content)
     .map(r => `### Skillmake: ${r.skill}\n\n${r.content}`)
@@ -225,14 +240,14 @@ function buildSkillReport(
   return { reportSection, skillsContent };
 }
 
-export function assembleContext(
+export async function assembleContext(
   request: string,
   current: Snapshot,
   previousSnapshots: Snapshot[],
   recall: MemoryRecallResult
-): string {
+): Promise<string> {
   const workspaceRoot = current.workspacePath;
-  const { reportSection, skillsContent } = buildSkillReport(
+  const { reportSection, skillsContent } = await buildSkillReport(
     workspaceRoot,
     request,
     current.diagnostics
