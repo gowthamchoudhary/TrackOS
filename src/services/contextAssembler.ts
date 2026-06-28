@@ -1,3 +1,7 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Worker } from "node:worker_threads";
 import {
   MemoryRecallResult,
   TraceMemory,
@@ -17,6 +21,28 @@ const RELEVANT_MEMORY_TYPES = new Set<TraceMemoryEventType>([
 ]);
 const ERROR_LIKE_PATTERN =
   /\b(error|exception|failed|failure|fatal|traceback|typeerror|syntaxerror|npm err!|command not found|module not found|exit code [1-9]\d*)\b/i;
+const SKILLMAKE_TIMEOUT_MS = 3_000;
+const SKILLMAKE_SYNC_WAIT_MS = SKILLMAKE_TIMEOUT_MS + 500;
+const SKILLMAKE_KEYWORDS: Record<string, string> = {
+  supabase: "supabase-agent-skills",
+  next: "better-auth-nextjs",
+  auth: "better-auth-nextjs",
+  animation: "framer-motion",
+  framer: "framer-motion",
+  playwright: "playwright-skill",
+  test: "mp-tdd",
+  tdd: "mp-tdd",
+  github: "claude-code-github-action",
+  deploy: "cloudflare-workers-deploy",
+  cloudflare: "cloudflare-workers-deploy",
+  design: "anthropic-frontend-design",
+  frontend: "anthropic-frontend-design",
+  ui: "anthropic-frontend-design",
+  linear: "linear-claude-skill",
+  webhook: "hookdeck-webhook-skills",
+  azure: "azure-deploy",
+  shadcn: "shadcn-ui-skill"
+};
 
 export function assembleContext(
   request: string,
@@ -70,7 +96,137 @@ export function assembleContext(
     )
   );
 
+  const skillmakeSkill = fetchSkillmakeSkillForContext(request);
+  if (skillmakeSkill) {
+    sections.push(
+      section(
+        "Skillmake Skill",
+        [
+          "The following skill was automatically fetched from Skillmake based on your request.",
+          "Apply it alongside TraceOS memory.",
+          "",
+          skillmakeSkill
+        ].join("\n")
+      )
+    );
+  }
+
   return `${sections.join("\n\n")}\n`;
+}
+
+export async function fetchSkillmakeSkill(
+  request: string
+): Promise<string | undefined> {
+  const skillName = findSkillmakeSkillName(request);
+  if (!skillName) {
+    return undefined;
+  }
+
+  try {
+    return await httpsGet(
+      `https://skillmake.xyz/i/${skillName}`,
+      SKILLMAKE_TIMEOUT_MS
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function fetchSkillmakeSkillForContext(request: string): string | undefined {
+  if (!findSkillmakeSkillName(request)) {
+    return undefined;
+  }
+
+  const sharedBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const state = new Int32Array(sharedBuffer);
+  const tempDirectory = mkdtempSync(path.join(os.tmpdir(), "traceos-skillmake-"));
+  const resultFile = path.join(tempDirectory, "result.json");
+  const worker = new Worker(
+    [
+      'const { workerData } = require("node:worker_threads");',
+      'const { writeFileSync } = require("node:fs");',
+      "const state = new Int32Array(workerData.sharedBuffer);",
+      "const { fetchSkillmakeSkill } = require(workerData.modulePath);",
+      "fetchSkillmakeSkill(workerData.request)",
+      "  .then((content) => {",
+      "    writeFileSync(workerData.resultFile, JSON.stringify({ content }), \"utf8\");",
+      "  })",
+      "  .catch(() => {",
+      "    writeFileSync(workerData.resultFile, JSON.stringify({}), \"utf8\");",
+      "  })",
+      "  .finally(() => {",
+      "    Atomics.store(state, 0, 1);",
+      "    Atomics.notify(state, 0);",
+      "  });"
+    ].join("\n"),
+    {
+      eval: true,
+      workerData: {
+        modulePath: __filename,
+        request,
+        resultFile,
+        sharedBuffer
+      }
+    }
+  );
+
+  try {
+    const waitResult = Atomics.wait(
+      state,
+      0,
+      0,
+      SKILLMAKE_SYNC_WAIT_MS
+    );
+    if (waitResult === "timed-out" || !existsSync(resultFile)) {
+      return undefined;
+    }
+
+    const result = JSON.parse(readFileSync(resultFile, "utf8")) as {
+      content?: unknown;
+    };
+    return typeof result.content === "string" && result.content.trim()
+      ? result.content
+      : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    void worker.terminate();
+    rmSync(tempDirectory, { recursive: true, force: true });
+  }
+}
+
+function findSkillmakeSkillName(request: string): string | undefined {
+  const normalizedRequest = request.toLowerCase();
+  return Object.entries(SKILLMAKE_KEYWORDS).find(([keyword]) =>
+    normalizedRequest.includes(keyword)
+  )?.[1];
+}
+
+function httpsGet(url: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const https = require("node:https") as typeof import("node:https");
+    const req = https.get(url, { timeout: timeoutMs }, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        if (res.headers.location) {
+          httpsGet(res.headers.location, timeoutMs).then(resolve).catch(reject);
+          return;
+        }
+      }
+      if (res.statusCode && res.statusCode >= 400) {
+        reject(new Error(`HTTP ${res.statusCode}`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      res.on("error", reject);
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("timeout"));
+    });
+    req.on("error", reject);
+  });
 }
 
 function section(title: string, content: string): string {
