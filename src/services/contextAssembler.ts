@@ -1,7 +1,3 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { Worker } from "node:worker_threads";
 import {
   MemoryRecallResult,
   TraceMemory,
@@ -21,28 +17,198 @@ const RELEVANT_MEMORY_TYPES = new Set<TraceMemoryEventType>([
 ]);
 const ERROR_LIKE_PATTERN =
   /\b(error|exception|failed|failure|fatal|traceback|typeerror|syntaxerror|npm err!|command not found|module not found|exit code [1-9]\d*)\b/i;
-const SKILLMAKE_TIMEOUT_MS = 3_000;
-const SKILLMAKE_SYNC_WAIT_MS = SKILLMAKE_TIMEOUT_MS + 500;
-const SKILLMAKE_KEYWORDS: Record<string, string> = {
-  supabase: "supabase-agent-skills",
-  next: "better-auth-nextjs",
-  auth: "better-auth-nextjs",
-  animation: "framer-motion",
-  framer: "framer-motion",
-  playwright: "playwright-skill",
-  test: "mp-tdd",
-  tdd: "mp-tdd",
-  github: "claude-code-github-action",
-  deploy: "cloudflare-workers-deploy",
-  cloudflare: "cloudflare-workers-deploy",
-  design: "anthropic-frontend-design",
-  frontend: "anthropic-frontend-design",
-  ui: "anthropic-frontend-design",
-  linear: "linear-claude-skill",
-  webhook: "hookdeck-webhook-skills",
-  azure: "azure-deploy",
-  shadcn: "shadcn-ui-skill"
-};
+
+function analyzeProjectDependencies(workspaceRoot: string): string[] {
+  try {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const path = require("node:path") as typeof import("node:path");
+    const pkgPath = path.join(workspaceRoot, "package.json");
+    if (!fs.existsSync(pkgPath)) return [];
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const allDeps = {
+      ...(pkg.dependencies ?? {}),
+      ...(pkg.devDependencies ?? {})
+    };
+    const depToSkill: Record<string, string> = {
+      "@supabase/supabase-js": "supabase-agent-skills",
+      "supabase": "supabase-agent-skills",
+      "shadcn": "shadcn-ui-skill",
+      "@shadcn/ui": "shadcn-ui-skill",
+      "framer-motion": "framer-motion",
+      "playwright": "playwright-skill",
+      "@playwright/test": "playwright-skill",
+      "better-auth": "better-auth-nextjs",
+      "next-auth": "better-auth-nextjs",
+      "tailwindcss": "anthropic-frontend-design",
+      "next": "anthropic-frontend-design",
+      "@anthropic-ai/sdk": "claude-api",
+      "anthropic": "claude-api",
+      "vitest": "mp-tdd",
+      "jest": "mp-tdd"
+    };
+    const detected: string[] = [];
+    for (const dep of Object.keys(allDeps)) {
+      const skill = depToSkill[dep];
+      if (skill && !detected.includes(skill)) {
+        detected.push(skill);
+      }
+    }
+    return detected;
+  } catch {
+    return [];
+  }
+}
+
+function getSkillCacheDir(): string {
+  const os = require("node:os") as typeof import("node:os");
+  const path = require("node:path") as typeof import("node:path");
+  const fs = require("node:fs") as typeof import("node:fs");
+  const dir = path.join(os.homedir(), ".traceos", "skills");
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+function getCachedOrFetchSkill(skillName: string): string | undefined {
+  try {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const path = require("node:path") as typeof import("node:path");
+    const cacheDir = getSkillCacheDir();
+    const cachePath = path.join(cacheDir, `${skillName}.md`);
+    const metaPath = path.join(cacheDir, `${skillName}.meta.json`);
+    const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+    // Check if cached and fresh
+    if (fs.existsSync(cachePath) && fs.existsSync(metaPath)) {
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as { fetchedAt: number };
+      if (Date.now() - meta.fetchedAt < CACHE_TTL_MS) {
+        return fs.readFileSync(cachePath, "utf8");
+      }
+    }
+
+    // Fetch from Skillmake synchronously using child_process
+    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+    let content: string;
+    try {
+      content = execFileSync("curl", [
+        "--silent",
+        "--fail",
+        "--max-time", "5",
+        "--location",
+        `https://skillmake.xyz/i/${skillName}`
+      ], { encoding: "utf8" });
+    } catch {
+      return undefined;
+    }
+
+    if (!content || content.length < 50) return undefined;
+
+    // Cache it
+    fs.writeFileSync(cachePath, content, "utf8");
+    fs.writeFileSync(metaPath, JSON.stringify({ fetchedAt: Date.now() }), "utf8");
+
+    return content;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildSkillReport(
+  workspaceRoot: string,
+  userRequest: string
+): { reportSection: string; skillsContent: string } {
+  const detected = analyzeProjectDependencies(workspaceRoot);
+
+  // Also check user request for additional skill hints
+  const requestLower = userRequest.toLowerCase();
+  const requestSkillMap: Record<string, string> = {
+    "supabase": "supabase-agent-skills",
+    "shadcn": "shadcn-ui-skill",
+    "framer": "framer-motion",
+    "playwright": "playwright-skill",
+    "auth": "better-auth-nextjs",
+    "tailwind": "anthropic-frontend-design",
+    "frontend": "anthropic-frontend-design",
+    "ui": "anthropic-frontend-design",
+    "test": "mp-tdd",
+    "tdd": "mp-tdd",
+    "diagnose": "mp-diagnose",
+    "debug": "mp-diagnose",
+    "claude": "claude-api",
+    "anthropic": "claude-api"
+  };
+  const fromRequest: string[] = [];
+  for (const [keyword, skill] of Object.entries(requestSkillMap)) {
+    if (requestLower.includes(keyword) && !detected.includes(skill)) {
+      fromRequest.push(skill);
+    }
+  }
+  const allSkills = [...new Set([...detected, ...fromRequest])];
+
+  if (allSkills.length === 0) {
+    return { reportSection: "", skillsContent: "" };
+  }
+
+  // Resolve each skill - cached or fresh
+  const results: Array<{ skill: string; status: "cached" | "downloaded" | "unavailable"; content?: string }> = [];
+  for (const skill of allSkills) {
+    const content = getCachedOrFetchSkill(skill);
+    const cacheDir = getSkillCacheDir();
+    const path = require("node:path") as typeof import("node:path");
+    const fs = require("node:fs") as typeof import("node:fs");
+    const metaPath = path.join(cacheDir, `${skill}.meta.json`);
+    let status: "cached" | "downloaded" | "unavailable";
+    if (!content) {
+      status = "unavailable";
+    } else if (fs.existsSync(metaPath)) {
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as { fetchedAt: number };
+      const age = Date.now() - meta.fetchedAt;
+      status = age < 5000 ? "downloaded" : "cached"; // downloaded if fetched in last 5 seconds
+    } else {
+      status = "downloaded";
+    }
+    results.push({ skill, status, content: content ?? undefined });
+  }
+
+  // Build the report block
+  const detectedList = detected.length > 0
+    ? detected.map(s => `  ✓ ${s} (from package.json)`).join("\n")
+    : "  (none detected)";
+  const requestList = fromRequest.length > 0
+    ? fromRequest.map(s => `  ✓ ${s} (from request keywords)`).join("\n")
+    : "";
+  const skillStatusList = results
+    .map(r => {
+      const icon = r.status === "unavailable" ? "✗" : "✓";
+      const label = r.status === "cached" ? "cached" : r.status === "downloaded" ? "downloaded" : "unavailable";
+      return `  ${icon} ${r.skill} (${label})`;
+    })
+    .join("\n");
+
+  const reportSection = [
+    "## Skillmake - Project Skill Analysis",
+    "",
+    "**Detected from package.json:**",
+    detectedList,
+    requestList ? `\n**Detected from request:**\n${requestList}` : "",
+    "",
+    "**Skills loaded:**",
+    skillStatusList,
+    ""
+  ].filter(l => l !== undefined).join("\n");
+
+  // Combine all available skill content
+  const skillsContent = results
+    .filter(r => r.content)
+    .map(r => `### Skillmake: ${r.skill}\n\n${r.content}`)
+    .join("\n\n---\n\n");
+
+  return { reportSection, skillsContent };
+}
 
 export function assembleContext(
   request: string,
@@ -50,6 +216,8 @@ export function assembleContext(
   previousSnapshots: Snapshot[],
   recall: MemoryRecallResult
 ): string {
+  const workspaceRoot = current.workspacePath;
+  const { reportSection, skillsContent } = buildSkillReport(workspaceRoot, request);
   const sections = [
     "# TRACEOS CONTEXT",
     section("User Request", request),
@@ -60,10 +228,17 @@ export function assembleContext(
         `* Active file: ${current.activeFile ?? "No active workspace file."}`,
         `* Timestamp: ${current.timestamp}`
       ].join("\n")
-    ),
+    )
+  ];
+
+  if (reportSection) {
+    sections.push(reportSection);
+  }
+
+  sections.push(
     section("Current Exact Diagnostics", formatDiagnostics(current.diagnostics)),
     section("Current Git Status", formatGitStatus(current))
-  ];
+  );
 
   if (shouldIncludeGitDiff(request, current)) {
     sections.push(section("Current Git Diff Summary", formatGitDiff(current)));
@@ -96,137 +271,16 @@ export function assembleContext(
     )
   );
 
-  const skillmakeSkill = fetchSkillmakeSkillForContext(request);
-  if (skillmakeSkill) {
+  if (skillsContent) {
     sections.push(
       section(
-        "Skillmake Skill",
-        [
-          "The following skill was automatically fetched from Skillmake based on your request.",
-          "Apply it alongside TraceOS memory.",
-          "",
-          skillmakeSkill
-        ].join("\n")
+        "Skillmake Skills - Loaded for This Session",
+        skillsContent
       )
     );
   }
 
   return `${sections.join("\n\n")}\n`;
-}
-
-export async function fetchSkillmakeSkill(
-  request: string
-): Promise<string | undefined> {
-  const skillName = findSkillmakeSkillName(request);
-  if (!skillName) {
-    return undefined;
-  }
-
-  try {
-    return await httpsGet(
-      `https://skillmake.xyz/i/${skillName}`,
-      SKILLMAKE_TIMEOUT_MS
-    );
-  } catch {
-    return undefined;
-  }
-}
-
-function fetchSkillmakeSkillForContext(request: string): string | undefined {
-  if (!findSkillmakeSkillName(request)) {
-    return undefined;
-  }
-
-  const sharedBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
-  const state = new Int32Array(sharedBuffer);
-  const tempDirectory = mkdtempSync(path.join(os.tmpdir(), "traceos-skillmake-"));
-  const resultFile = path.join(tempDirectory, "result.json");
-  const worker = new Worker(
-    [
-      'const { workerData } = require("node:worker_threads");',
-      'const { writeFileSync } = require("node:fs");',
-      "const state = new Int32Array(workerData.sharedBuffer);",
-      "const { fetchSkillmakeSkill } = require(workerData.modulePath);",
-      "fetchSkillmakeSkill(workerData.request)",
-      "  .then((content) => {",
-      "    writeFileSync(workerData.resultFile, JSON.stringify({ content }), \"utf8\");",
-      "  })",
-      "  .catch(() => {",
-      "    writeFileSync(workerData.resultFile, JSON.stringify({}), \"utf8\");",
-      "  })",
-      "  .finally(() => {",
-      "    Atomics.store(state, 0, 1);",
-      "    Atomics.notify(state, 0);",
-      "  });"
-    ].join("\n"),
-    {
-      eval: true,
-      workerData: {
-        modulePath: __filename,
-        request,
-        resultFile,
-        sharedBuffer
-      }
-    }
-  );
-
-  try {
-    const waitResult = Atomics.wait(
-      state,
-      0,
-      0,
-      SKILLMAKE_SYNC_WAIT_MS
-    );
-    if (waitResult === "timed-out" || !existsSync(resultFile)) {
-      return undefined;
-    }
-
-    const result = JSON.parse(readFileSync(resultFile, "utf8")) as {
-      content?: unknown;
-    };
-    return typeof result.content === "string" && result.content.trim()
-      ? result.content
-      : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    void worker.terminate();
-    rmSync(tempDirectory, { recursive: true, force: true });
-  }
-}
-
-function findSkillmakeSkillName(request: string): string | undefined {
-  const normalizedRequest = request.toLowerCase();
-  return Object.entries(SKILLMAKE_KEYWORDS).find(([keyword]) =>
-    normalizedRequest.includes(keyword)
-  )?.[1];
-}
-
-function httpsGet(url: string, timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const https = require("node:https") as typeof import("node:https");
-    const req = https.get(url, { timeout: timeoutMs }, (res) => {
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        if (res.headers.location) {
-          httpsGet(res.headers.location, timeoutMs).then(resolve).catch(reject);
-          return;
-        }
-      }
-      if (res.statusCode && res.statusCode >= 400) {
-        reject(new Error(`HTTP ${res.statusCode}`));
-        return;
-      }
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk: Buffer) => chunks.push(chunk));
-      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-      res.on("error", reject);
-    });
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error("timeout"));
-    });
-    req.on("error", reject);
-  });
 }
 
 function section(title: string, content: string): string {
