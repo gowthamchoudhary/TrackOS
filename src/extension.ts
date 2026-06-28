@@ -299,7 +299,7 @@ async function generateContext(
   }
   const markdown =
     managedMarkdown ??
-    assembleContext(
+    await assembleContext(
       request,
       snapshot,
       await getPreviousSnapshots(workspace, snapshot.id),
