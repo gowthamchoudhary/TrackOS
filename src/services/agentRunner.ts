@@ -229,10 +229,12 @@ export function buildAgentPrompt(request: string): string {
     request,
     "",
     "Rules:",
-    "- Use only evidence from TraceOS context.",
-    "- Do not invent missing errors.",
-    "- Avoid repeated failures listed in the context.",
-    "- Prefer relevant files listed in the context."
+    "- TraceOS context is your memory layer. Read it before starting.",
+    "- Do NOT repeat any failed attempt listed in Decision Context.",
+    "- Do NOT re-apply any fix that is marked as failed above.",
+    "- Prefer files and approaches that succeeded before.",
+    "- If a Skillmake skill is provided in context, follow its guidance.",
+    "- Otherwise work normally — TraceOS context is additional help, not a restriction."
   ].join("\n");
 }
 

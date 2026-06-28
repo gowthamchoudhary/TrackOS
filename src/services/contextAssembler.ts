@@ -119,12 +119,23 @@ function getCachedOrFetchSkill(skillName: string): string | undefined {
 
 function buildSkillReport(
   workspaceRoot: string,
-  userRequest: string
+  userRequest: string,
+  diagnostics: DiagnosticEvidence[]
 ): { reportSection: string; skillsContent: string } {
   const detected = analyzeProjectDependencies(workspaceRoot);
 
   // Also check user request for additional skill hints
   const requestLower = userRequest.toLowerCase();
+  const automaticSkills: string[] = [];
+  if (diagnostics.length > 0) {
+    automaticSkills.push("mp-diagnose");
+  }
+  if (/\b(fix|error|bug|broken|failing|crash|test)\b/.test(requestLower)) {
+    automaticSkills.push("mp-tdd");
+  }
+  if (/\b(claude|anthropic|ai|llm|model|api)\b/.test(requestLower)) {
+    automaticSkills.push("claude-api");
+  }
   const requestSkillMap: Record<string, string> = {
     "supabase": "supabase-agent-skills",
     "shadcn": "shadcn-ui-skill",
@@ -147,7 +158,7 @@ function buildSkillReport(
       fromRequest.push(skill);
     }
   }
-  const allSkills = [...new Set([...detected, ...fromRequest])];
+  const allSkills = [...new Set([...detected, ...automaticSkills, ...fromRequest])];
 
   if (allSkills.length === 0) {
     return { reportSection: "", skillsContent: "" };
@@ -181,6 +192,9 @@ function buildSkillReport(
   const requestList = fromRequest.length > 0
     ? fromRequest.map(s => `  ✓ ${s} (from request keywords)`).join("\n")
     : "";
+  const automaticList = automaticSkills.length > 0
+    ? automaticSkills.map(s => `  ✓ ${s} (automatic)`).join("\n")
+    : "";
   const skillStatusList = results
     .map(r => {
       const icon = r.status === "unavailable" ? "✗" : "✓";
@@ -194,6 +208,7 @@ function buildSkillReport(
     "",
     "**Detected from package.json:**",
     detectedList,
+    automaticList ? `\n**Detected automatically:**\n${automaticList}` : "",
     requestList ? `\n**Detected from request:**\n${requestList}` : "",
     "",
     "**Skills loaded:**",
@@ -217,7 +232,11 @@ export function assembleContext(
   recall: MemoryRecallResult
 ): string {
   const workspaceRoot = current.workspacePath;
-  const { reportSection, skillsContent } = buildSkillReport(workspaceRoot, request);
+  const { reportSection, skillsContent } = buildSkillReport(
+    workspaceRoot,
+    request,
+    current.diagnostics
+  );
   const sections = [
     "# TRACEOS CONTEXT",
     section("User Request", request),
