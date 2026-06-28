@@ -83,7 +83,7 @@ export function assembleContext(
       "Repeated Diagnostics From Session",
       formatRepeatedDiagnostics(current.diagnostics, previousSnapshots)
     ),
-    section("Previous TraceOS Memories", formatMemories(recall)),
+    section("Decision Context — Relevant Past Experiences", formatMemories(recall)),
     section(
       "Agent Instructions",
       [
@@ -348,7 +348,7 @@ function formatMemories(recall: MemoryRecallResult): string {
   }
 
   if (recall.memories.length === 0) {
-    return "No relevant managed memories were retrieved.";
+    return "No relevant past experiences found for this request.";
   }
 
   const memories = recall.memories
@@ -357,26 +357,53 @@ function formatMemories(recall: MemoryRecallResult): string {
     .slice(0, 5);
 
   if (memories.length === 0) {
-    return "Retrieved managed memories did not match TraceOS relevance filters.";
+    return "No relevant past experiences found for this request.";
   }
 
   return memories.map(formatMemory).join("\n\n");
 }
 
 function formatMemory(memory: TraceMemory): string {
-  const evidence = summarizeMemoryEvidence(memory);
-  const details = [
-    `### ${memory.label}`,
-    "",
-    `* Event type: ${memory.eventType}`,
-    `* Timestamp: ${memory.timestamp || "Not provided."}`,
-    memory.filePath ? `* File: ${memory.filePath}` : undefined,
-    memory.summary ? `* Summary: ${memory.summary}` : undefined,
-    "",
-    evidence
-  ];
+  const lines: string[] = [];
 
-  return details.filter((item): item is string => item !== undefined).join("\n");
+  // Header based on event type
+  if (memory.eventType === "agent_error" || memory.eventType === "agent_command_failure") {
+    lines.push(`### ⚠️ Previous Attempt — ${memory.label}`);
+  } else if (memory.eventType === "pattern") {
+    lines.push(`### 🔁 Repeated Issue — ${memory.label}`);
+  } else if (memory.eventType === "diagnostic") {
+    lines.push(`### 🔴 Known Diagnostic — ${memory.label}`);
+  } else {
+    lines.push(`### ${memory.label}`);
+  }
+
+  lines.push("");
+  lines.push(`* Event type: ${memory.eventType}`);
+  lines.push(`* Timestamp: ${memory.timestamp || "Not provided."}`);
+  if (memory.filePath) {
+    lines.push(`* File: ${memory.filePath}`);
+  }
+
+  // If rawEvidence looks like a structured lesson (contains "type:" and "outcome:")
+  // render it directly as decision context
+  if (memory.rawEvidence && memory.rawEvidence.includes("outcome:") && memory.rawEvidence.includes("type:")) {
+    lines.push("");
+    lines.push("**Decision Context:**");
+    lines.push("");
+    lines.push("```");
+    lines.push(memory.rawEvidence.trim());
+    lines.push("```");
+  } else {
+    // Fall back to summary + snippet for non-lesson memories
+    if (memory.summary) {
+      lines.push(`* Summary: ${memory.summary}`);
+    }
+    lines.push("");
+    const evidence = summarizeMemoryEvidence(memory);
+    lines.push(evidence);
+  }
+
+  return lines.filter((line): line is string => line !== undefined).join("\n");
 }
 
 function isRelevantMemory(memory: TraceMemory): boolean {

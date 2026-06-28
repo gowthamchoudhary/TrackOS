@@ -127,15 +127,58 @@ export async function recallRelevantContext(
     type: "memory",
     queryBy: "hybrid",
     mode: "thinking",
-    maxResults: 10,
+    maxResults: 20,
     graphContext: true,
     recencyBias: 0.3
   });
 
+  const raw = parseHydraMemories(response, project, userId);
+  const filtered = filterRelevantMemories(raw, request);
   return {
-    memories: parseHydraMemories(response, project, userId),
+    memories: filtered,
     hydraAvailable: true
   };
+}
+
+function filterRelevantMemories(
+  memories: TraceMemory[],
+  request: string
+): TraceMemory[] {
+  // Extract meaningful keywords from request (words longer than 4 chars)
+  const keywords = [
+    ...new Set(
+      request
+        .toLowerCase()
+        .split(/\W+/)
+        .filter((word) => word.length > 4)
+    )
+  ];
+
+  // Deduplicate by summary - keep most recent of each unique error
+  const seenSummaries = new Map<string, TraceMemory>();
+  for (const memory of memories) {
+    const key = memory.summary?.slice(0, 80).toLowerCase() ?? memory.id;
+    if (!seenSummaries.has(key)) {
+      seenSummaries.set(key, memory);
+    }
+  }
+  const deduped = [...seenSummaries.values()];
+
+  // Keep only memories relevant to the request
+  if (keywords.length === 0) {
+    return deduped;
+  }
+
+  return deduped.filter((memory) => {
+    const searchText = [
+      memory.rawEvidence ?? "",
+      memory.label ?? "",
+      memory.summary ?? "",
+      memory.filePath ?? ""
+    ].join(" ").toLowerCase();
+
+    return keywords.some((keyword) => searchText.includes(keyword));
+  });
 }
 
 export function snapshotToMemories(
@@ -221,6 +264,58 @@ export function snapshotToMemories(
   return deduplicateMemoriesById(memories);
 }
 
+function extractLesson(
+  output: string,
+  command: string,
+  exitCode: number | null,
+  errorPatterns: string[]
+): string {
+  const lines = output.split(/\r?\n/).filter((line) => line.trim());
+
+  // Extract error lines
+  const errorLines = lines
+    .filter((line) => /error|failed|exception|cannot|undefined|null|timeout/i.test(line))
+    .slice(0, 5)
+    .map((line) => line.trim().slice(0, 200));
+
+  // Extract file paths mentioned
+  const filePaths = [
+    ...new Set(output.match(/src\/[a-zA-Z0-9\/._-]+\.ts/g) ?? [])
+  ].slice(0, 5);
+
+  // Extract what was attempted
+  const attemptLines = lines
+    .filter((line) => /trying|attempting|running|applying|updating|fixing/i.test(line))
+    .slice(0, 3)
+    .map((line) => line.trim().slice(0, 150));
+
+  const succeeded = exitCode === 0;
+
+  return [
+    `type: ${succeeded ? "successful_fix" : "failed_attempt"}`,
+    ``,
+    `task:`,
+    `  ${command.slice(0, 150)}`,
+    ``,
+    `outcome:`,
+    `  ${succeeded ? "Succeeded" : "Failed"}`,
+    ``,
+    errorPatterns.length > 0 ? `errors_detected:\n  ${errorPatterns.join("\n  ")}` : "",
+    ``,
+    errorLines.length > 0 ? `error_details:\n  ${errorLines.join("\n  ")}` : "",
+    ``,
+    filePaths.length > 0 ? `files_involved:\n  ${filePaths.join("\n  ")}` : "",
+    ``,
+    attemptLines.length > 0 ? `what_was_attempted:\n  ${attemptLines.join("\n  ")}` : "",
+    ``,
+    `avoid:`,
+    `  ${succeeded ? "N/A" : `Repeating: ${errorPatterns[0] ?? "same approach"}`}`,
+    ``,
+    `confidence:`,
+    `  ${succeeded ? "0.95" : "0.80"}`
+  ].filter((line) => line !== "").join("\n");
+}
+
 export function agentEvidenceToMemories(
   evidence: AgentRunEvidence,
   project: string,
@@ -250,23 +345,18 @@ export function agentEvidenceToMemories(
   }
 
   if (evidence.errorPatterns.length > 0) {
-    // FIX: summary shows WHAT matched, not just a generic label
-    const matchedPatterns = evidence.errorPatterns.join(", ");
-    const firstErrorLine = evidence.output
-      ?.split(/\r?\n/)
-      .find((line) => /error|fail|exception/i.test(line))
-      ?.trim()
-      .slice(0, 200);
-
     memories.push({
       ...common,
       id: `${evidence.id}:error`,
       label: `${evidence.agentId} agent error output`,
       eventType: "agent_error",
-      rawEvidence: evidence.output || evidence.stderr,
-      summary: firstErrorLine
-        ? `Matched [${matchedPatterns}]: ${firstErrorLine}`
-        : `Agent output matched error patterns: ${matchedPatterns}`,
+      rawEvidence: extractLesson(
+        evidence.output || evidence.stderr,
+        evidence.command,
+        evidence.exitCode,
+        evidence.errorPatterns
+      ),
+      summary: "Lesson extracted from agent session",
       tags: ["agent", evidence.agentId, "error", ...evidence.errorPatterns],
       importance: "high"
     });
@@ -278,19 +368,13 @@ export function agentEvidenceToMemories(
       id: `${evidence.id}:command_failure`,
       label: `${evidence.agentId} agent command failure`,
       eventType: "agent_command_failure",
-      rawEvidence: JSON.stringify(
-        {
-          command: evidence.command,
-          exitCode: evidence.exitCode,
-          signal: evidence.signal,
-          stderr: evidence.stderr,
-          output: evidence.output
-        },
-        null,
-        2
+      rawEvidence: extractLesson(
+        evidence.output || evidence.stderr,
+        evidence.command,
+        evidence.exitCode,
+        evidence.errorPatterns
       ),
-      // FIX: summary includes command and exit code, not just exit code
-      summary: `Command "${evidence.command}" exited with code ${String(evidence.exitCode)}.`,
+      summary: "Lesson extracted from failed command",
       tags: ["agent", evidence.agentId, "command-failure"],
       importance: "high"
     });
@@ -344,14 +428,20 @@ function buildEnrichedQuery(
   project: string,
   snapshot: Snapshot
 ): string {
+  // Extract semantic keywords from the request
+  const keywords = request
+    .toLowerCase()
+    .split(/\W+/)
+    .filter((word) => word.length > 3)
+    .join(" ");
+
   const evidence = [
     `User request: ${request}`,
+    `Semantic keywords: ${keywords}`,
     `Project: ${project}`,
     snapshot.activeFile ? `Current file: ${snapshot.activeFile}` : undefined,
     snapshot.diagnostics.length > 0
-      ? `Diagnostic messages: ${snapshot.diagnostics
-          .map((diagnostic) => diagnostic.message)
-          .join(" | ")}`
+      ? `Current errors: ${snapshot.diagnostics.map((diagnostic) => diagnostic.message).join(" | ")}`
       : undefined,
     snapshot.git.changedFiles.length > 0
       ? `Changed files: ${snapshot.git.changedFiles.join(", ")}`
