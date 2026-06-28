@@ -12,6 +12,16 @@ interface CommandMessage {
   command: "viewAgentOutput" | "openSessionLog";
 }
 
+interface SetTeamCodeMessage {
+  type: "setTeamCode";
+  teamCode: string;
+}
+
+interface CopyToClipboardMessage {
+  type: "copyToClipboard";
+  text: string;
+}
+
 export type TraceosPhase =
   | "ready"
   | "capturing"
@@ -70,10 +80,36 @@ export class TraceosViewProvider implements vscode.WebviewViewProvider {
       this.webview = undefined;
     });
     void postState(webviewView.webview, this.state);
+    void postTeamCode(webviewView.webview);
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible) {
+        void postTeamCode(webviewView.webview);
+      }
+    });
 
     webviewView.webview.onDidReceiveMessage(async (message: unknown) => {
       if (isCommandMessage(message)) {
         await vscode.commands.executeCommand(`traceos.${message.command}`);
+        return;
+      }
+
+      if (isSetTeamCodeMessage(message)) {
+        await vscode.workspace
+          .getConfiguration("traceos")
+          .update(
+            "teamId",
+            message.teamCode,
+            vscode.ConfigurationTarget.Global
+          );
+        await webviewView.webview.postMessage({
+          type: "restoreTeamCode",
+          teamCode: message.teamCode
+        });
+        return;
+      }
+
+      if (isCopyToClipboardMessage(message)) {
+        await vscode.env.clipboard.writeText(message.text);
         return;
       }
 
@@ -179,6 +215,34 @@ function isCommandMessage(message: unknown): message is CommandMessage {
   );
 }
 
+function isSetTeamCodeMessage(
+  message: unknown
+): message is SetTeamCodeMessage {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+
+  const candidate = message as Partial<SetTeamCodeMessage>;
+  return (
+    candidate.type === "setTeamCode" &&
+    typeof candidate.teamCode === "string"
+  );
+}
+
+function isCopyToClipboardMessage(
+  message: unknown
+): message is CopyToClipboardMessage {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+
+  const candidate = message as Partial<CopyToClipboardMessage>;
+  return (
+    candidate.type === "copyToClipboard" &&
+    typeof candidate.text === "string"
+  );
+}
+
 function isAgentId(value: unknown): value is AgentId {
   return (
     value === "claude" ||
@@ -193,6 +257,16 @@ async function postState(
   state: TraceosSidebarState
 ): Promise<void> {
   await webview.postMessage({ type: "state", state });
+}
+
+async function postTeamCode(webview: vscode.Webview): Promise<void> {
+  const currentTeamId = vscode.workspace
+    .getConfiguration("traceos")
+    .get<string>("teamId", "");
+  await webview.postMessage({
+    type: "restoreTeamCode",
+    teamCode: currentTeamId
+  });
 }
 
 function getHtml(webview: vscode.Webview): string {
@@ -435,6 +509,24 @@ function getHtml(webview: vscode.Webview): string {
     .error-row.visible {
       display: grid;
     }
+    .section { margin-bottom: 16px; padding: 12px; border: 1px solid var(--vscode-widget-border); border-radius: 4px; }
+    .section-label { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; color: var(--vscode-descriptionForeground); margin-bottom: 10px; }
+    .team-mode-display { display: flex; flex-direction: column; gap: 8px; }
+    .team-status-row { display: flex; align-items: center; gap: 6px; }
+    .team-status-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .team-status-dot.solo { background: var(--vscode-descriptionForeground); }
+    .team-status-dot.team { background: #4caf50; }
+    .team-status-text { font-size: 12px; font-weight: 500; }
+    .team-actions { display: flex; flex-direction: column; gap: 6px; }
+    .team-join-row { display: flex; gap: 6px; }
+    .team-join-row input { flex: 1; padding: 4px 8px; font-size: 11px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 3px; }
+    .team-code-display { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .team-code-label { color: var(--vscode-descriptionForeground); }
+    .team-code-value { font-family: monospace; font-size: 10px; color: var(--vscode-textLink-foreground); word-break: break-all; }
+    .btn-secondary { padding: 4px 10px; font-size: 11px; cursor: pointer; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; }
+    .btn-secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .btn-leave { margin-top: 2px; }
+    .btn-icon { background: none; border: none; cursor: pointer; color: var(--vscode-textLink-foreground); font-size: 14px; padding: 0 4px; }
     @media (max-width: 260px) {
       .header {
         display: grid;
@@ -518,6 +610,37 @@ function getHtml(webview: vscode.Webview): string {
       <button id="run" type="button">Run With Memory</button>
       <button id="viewOutput" class="secondary-button" type="button">View Agent Output</button>
       <button id="openLog" class="secondary-button" type="button">Open Session Log</button>
+    </div>
+
+    <div class="section" id="team-section">
+      <div class="section-label">TEAM MEMORY</div>
+      
+      <div id="solo-mode" class="team-mode-display">
+        <div class="team-status-row">
+          <span class="team-status-dot solo"></span>
+          <span class="team-status-text">Solo Mode</span>
+        </div>
+        <div class="team-actions">
+          <button class="btn-secondary" id="generate-team-btn">Generate Team Code</button>
+          <div class="team-join-row">
+            <input type="text" id="team-code-input" placeholder="Enter team code..." maxlength="36" />
+            <button class="btn-secondary" id="join-team-btn">Join</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="team-mode" class="team-mode-display" style="display:none">
+        <div class="team-status-row">
+          <span class="team-status-dot team"></span>
+          <span class="team-status-text" id="team-mode-label">Team Mode</span>
+        </div>
+        <div class="team-code-display">
+          <span class="team-code-label">Team Code:</span>
+          <span id="current-team-code" class="team-code-value">&mdash;</span>
+          <button class="btn-icon" id="copy-team-code-btn" title="Copy team code">&#x29C9;</button>
+        </div>
+        <button class="btn-secondary btn-leave" id="leave-team-btn">Leave Team</button>
+      </div>
     </div>
 
     <section class="card" aria-live="polite" aria-atomic="true">
@@ -679,9 +802,69 @@ function getHtml(webview: vscode.Webview): string {
         agentLabels[elements.agent.value] || "Custom";
     });
 
+    // Team mode state
+    let currentTeamCode = "";
+
+    function generateUUID() {
+      // Generate a UUID v4 (128-bit random, RFC 4122)
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === "x" ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+    }
+
+    function showTeamMode(code) {
+      currentTeamCode = code;
+      document.getElementById("solo-mode").style.display = "none";
+      document.getElementById("team-mode").style.display = "flex";
+      document.getElementById("current-team-code").textContent = code;
+      document.getElementById("team-mode-label").textContent = "Team Mode Active";
+    }
+
+    function showSoloMode() {
+      currentTeamCode = "";
+      document.getElementById("solo-mode").style.display = "flex";
+      document.getElementById("team-mode").style.display = "none";
+      document.getElementById("team-code-input").value = "";
+    }
+
+    document.getElementById("generate-team-btn").addEventListener("click", () => {
+      const code = generateUUID();
+      vscode.postMessage({ type: "setTeamCode", teamCode: code });
+      showTeamMode(code);
+    });
+
+    document.getElementById("join-team-btn").addEventListener("click", () => {
+      const code = document.getElementById("team-code-input").value.trim();
+      if (!code) return;
+      vscode.postMessage({ type: "setTeamCode", teamCode: code });
+      showTeamMode(code);
+    });
+
+    document.getElementById("leave-team-btn").addEventListener("click", () => {
+      vscode.postMessage({ type: "setTeamCode", teamCode: "" });
+      showSoloMode();
+    });
+
+    document.getElementById("copy-team-code-btn").addEventListener("click", () => {
+      if (currentTeamCode) {
+        navigator.clipboard.writeText(currentTeamCode).catch(() => {
+          vscode.postMessage({ type: "copyToClipboard", text: currentTeamCode });
+        });
+      }
+    });
+
     window.addEventListener("message", (event) => {
       if (event.data.type === "state") {
         render(event.data.state);
+      }
+      if (event.data.type === "restoreTeamCode") {
+        if (event.data.teamCode) {
+          showTeamMode(event.data.teamCode);
+        } else {
+          showSoloMode();
+        }
       }
     });
   </script>
