@@ -126,7 +126,7 @@ async function route(
       body.snapshot,
       body.teamId
     );
-    const markdown = assembleContext(
+    const markdown = await assembleContext(
       body.request,
       body.snapshot,
       [],
